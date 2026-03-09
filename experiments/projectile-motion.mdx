@@ -1,0 +1,554 @@
+---
+title: 'Projectile Motion'
+description: 'Analyze 2D kinematics with parabolic trajectory tracking using homography calibration'
+---
+
+## Overview
+
+The projectile motion experiment demonstrates 2D kinematics under constant gravitational acceleration. Using homography-based video tracking, you can measure initial velocity, launch angle, range, maximum height, and verify g from trajectory analysis.
+
+## Physics Theory
+
+### 2D Kinematic Equations
+
+For a projectile launched from $(x_0, y_0)$ with initial velocity $(v_{x0}, v_{y0})$:
+
+**Horizontal Motion** (no acceleration):
+$$x(t) = x_0 + v_{x0} t$$
+
+**Vertical Motion** (constant downward acceleration g):
+$$y(t) = y_0 + v_{y0} t - \frac{1}{2}g t^2$$
+
+### Trajectory Equation
+
+Eliminating time gives the parabolic path:
+
+$$y = y_0 + x\tan\theta - \frac{g x^2}{2v_0^2\cos^2\theta}$$
+
+Where:
+- $\theta$ is launch angle
+- $v_0 = \sqrt{v_{x0}^2 + v_{y0}^2}$ is initial speed
+
+### Key Parameters
+
+**Time of Flight** (from $y_0$ back to $y_0$):
+$$T = \frac{2v_{y0}}{g}$$
+
+**Maximum Height**:
+$$h_{max} = y_0 + \frac{v_{y0}^2}{2g}$$
+
+**Range** (horizontal distance):
+$$R = v_{x0} T = \frac{v_0^2 \sin(2\theta)}{g}$$
+
+**Time to Maximum Height**:
+$$t_{apogee} = \frac{v_{y0}}{g}$$
+
+## Measurement Method
+
+PhysisLab uses **homography-based video tracking** with rectangular reference frame:
+
+1. **4 Reference Markers**: Form rectangle with known dimensions
+2. **Perspective Transformation**: Maps distorted image to real-world coordinates
+3. **Per-Frame Homography**: Compensates for camera movement
+4. **Projectile Tracking**: Separate color detection for moving object
+
+**Source**: `~/workspace/source/MovimientoParabolico/analisis.py`
+
+## Hardware Requirements
+
+- Projectile (ball, dart, small object) with colored marker
+- 4× colored reference markers forming rectangle (different color from projectile)
+- Rectangle mounting (cardboard, wall, floor markers)
+- Ruler or measuring tape
+- Camera (30+ FPS recommended)
+- Launching mechanism (hand, ramp, spring launcher)
+
+## Experimental Procedure
+
+<Steps>
+  <Step title="Setup Reference Frame">
+    **Rectangle Configuration**:
+    1. Place 4 markers at corners of rectangle
+    2. Measure width and height precisely (meters)
+    3. Rectangle should be:
+       - In same vertical plane as trajectory
+       - Large enough to encompass projectile path
+       - Clearly visible throughout motion
+    
+    **Marker Labels**:
+    - **TL**: Top-Left
+    - **TR**: Top-Right
+    - **BL**: Bottom-Left
+    - **BR**: Bottom-Right
+  </Step>
+  
+  <Step title="Camera Position">
+    - Perpendicular to motion plane
+    - Stable mounting (tripod essential)
+    - Entire trajectory visible in frame
+    - Reference rectangle always in view
+  </Step>
+  
+  <Step title="Record Launch">
+    1. Test launch angles and speeds
+    2. Ensure projectile stays in frame
+    3. Record video of launch
+    4. Multiple trials recommended
+  </Step>
+  
+  <Step title="Run Analysis">
+    ```bash
+    cd ~/workspace/source/MovimientoParabolico
+    python analisis.py
+    ```
+    
+    Enter video path:
+    ```
+    Ruta del video (ej: parabola.mp4): your_video.mp4
+    ```
+  </Step>
+  
+  <Step title="Frame Selection">
+    Navigate and mark:
+    - `d`/`a`: ±1 frame
+    - `D`/`A`: ±10 frames
+    - `g`: Go to specific frame number
+    - `i`: Mark inicio (launch frame)
+    - `f`: Mark fin (landing frame)
+    - `ENTER`: Confirm
+  </Step>
+  
+  <Step title="Color Calibration">
+    1. Select ROI on one reference marker → auto HSV
+    2. Select ROI on projectile → auto HSV
+  </Step>
+  
+  <Step title="Verify Detection">
+    Check marker assignment:
+    - TL (cyan), TR (light blue), BL (orange), BR (green)
+    - Rectangle outline shown
+    - Press ENTER to continue
+  </Step>
+  
+  <Step title="Enter Dimensions">
+    ```
+    --- Dimensiones reales del rectángulo de referencia ---
+    Ancho  (TL → TR) en metros: 1.20
+    Alto   (BL → TL) en metros: 0.80
+    ```
+  </Step>
+  
+  <Step title="Tracking">
+    Automatic tracking displays:
+    - Yellow circle: projectile
+    - Colored circles: reference markers
+    - Status: OK (cyan) or FALLBACK (magenta)
+    - Real-time position in meters
+  </Step>
+</Steps>
+
+## Code Walkthrough
+
+### Rectangle Marker Assignment
+
+Geometric assignment by sums and differences (`analisis.py:149-158`):
+
+```python
+def asignar_rectangulo(pts):
+    """Asigna TL, TR, BL, BR a partir de 4 puntos."""
+    pts = np.array(pts)
+    s = pts[:,0] + pts[:,1]  # sum
+    d = pts[:,0] - pts[:,1]  # difference
+    
+    TL = pts[np.argmin(s)]   # mínimo x+y → arriba-izquierda
+    BR = pts[np.argmax(s)]   # máximo x+y → abajo-derecha
+    TR = pts[np.argmax(d)]   # máximo x-y → arriba-derecha
+    BL = pts[np.argmin(d)]   # mínimo x-y → abajo-izquierda
+    
+    return TL, TR, BL, BR
+```
+
+### Homography Calculation
+
+Perspective transformation for rectangular frame (`analisis.py:185-206`):
+
+```python
+# Real-world coordinates (meters)
+# Origin at BL (Bottom-Left), X→right, Y→up
+dst_pts = np.array([
+    [0.0,           rect_alto_m],   # TL
+    [rect_ancho_m,  rect_alto_m],   # TR
+    [0.0,           0.0        ],   # BL
+    [rect_ancho_m,  0.0        ],   # BR
+], dtype=np.float32)
+
+src_pts_ref = np.array([TL_ref, TR_ref, BL_ref, BR_ref], dtype=np.float32)
+
+# Calculate homography (4 points)
+H_ref, _ = cv2.findHomography(src_pts_ref, dst_pts)
+
+def img_to_world(px_pt, H):
+    """Transform pixel to world coordinates."""
+    p = np.array([px_pt[0], px_pt[1], 1.0], dtype=np.float64)
+    w = H @ p
+    return w[0]/w[2], w[1]/w[2]  # Normalize by w
+```
+
+### Per-Frame Homography Update
+
+Dynamic calibration compensates for camera movement (`analisis.py:226-237`):
+
+```python
+# Detect reference markers in current frame
+centros_f, _ = detectar_blobs(frame, ref_lower, ref_upper, n=4)
+hom_ok = False
+
+if len(centros_f) >= 4:
+    try:
+        TL_f, TR_f, BL_f, BR_f = asignar_rectangulo(centros_f)
+        src_f = np.array([TL_f, TR_f, BL_f, BR_f], dtype=np.float32)
+        H_f, _ = cv2.findHomography(src_f, dst_pts)
+        if H_f is not None:
+            H_actual = H_f
+            hom_ok = True
+    except Exception:
+        pass  # Use previous homography
+```
+
+### Parabolic Trajectory Fitting
+
+Fit x(t) and y(t) to kinematic equations (`analisis.py:306-349`):
+
+```python
+def tray_x(t, x0, vx0_fit):
+    return x0 + vx0_fit * t
+
+def tray_y(t, y0, vy0_fit, g_fit):
+    return y0 + vy0_fit * t - 0.5 * g_fit * t**2
+
+# Fit X (uniform motion)
+try:
+    popt_x, pcov_x = curve_fit(tray_x, t_raw, x_raw, p0=[x_raw[0], vx0])
+    x0_fit, vx0_fit = popt_x
+    perr_x = np.sqrt(np.diag(pcov_x))
+    ajuste_x_ok = True
+except Exception as e:
+    print(f"Ajuste X fallido: {e}")
+    ajuste_x_ok = False
+
+# Fit Y (constant acceleration)
+try:
+    popt_y, pcov_y = curve_fit(tray_y, t_raw, y_raw,
+                                p0=[y_raw[0], vy0, 9.8],
+                                bounds=([-np.inf, -50, 0], [np.inf, 50, 20]))
+    y0_fit, vy0_fit, g_fit = popt_y
+    perr_y = np.sqrt(np.diag(pcov_y))
+    ajuste_y_ok = True
+except Exception as e:
+    print(f"Ajuste Y fallido: {e}")
+    ajuste_y_ok = False
+
+# Calculate derived parameters
+v0_fit = np.sqrt(vx0_fit**2 + vy0_fit**2)
+angulo_fit = np.degrees(np.arctan2(vy0_fit, vx0_fit))
+
+# Flight parameters
+if g_fit > 0 and vy0_fit > 0:
+    t_vuelo = 2 * vy0_fit / g_fit
+    x_alcance = x0_fit + vx0_fit * t_vuelo
+    t_apogeo = vy0_fit / g_fit
+    y_max = y0_fit + vy0_fit * t_apogeo - 0.5 * g_fit * t_apogeo**2
+```
+
+### Acceleration Analysis
+
+Verify g from numerical differentiation (`analisis.py:352`):
+
+```python
+# Calculate acceleration from velocity derivatives
+ax_arr = smooth(np.gradient(vx, t_raw), w=5)
+ay_arr = smooth(np.gradient(vy, t_raw), w=5)
+
+# g from central portion (avoid edge effects)
+g_medio = -np.mean(ay_arr[len(ay_arr)//4 : 3*len(ay_arr)//4])
+
+print(f"g (ajuste parabólico): {g_fit:.4f} m/s²  ± {perr_y[2]:.4f}")
+print(f"g (deriv. aceleración): {g_medio:.4f} m/s²")
+```
+
+## Data Analysis
+
+### Output Files
+
+**Data File**: `datos_parabolico.txt`
+```
+t(s)  x(m)  y(m)  vx(m/s)  vy(m/s)  ax(m/s2)  ay(m/s2)
+# g_fit=9.7543 m/s2  v0=4.8234 m/s  angulo=52.34 deg
+0.000  0.0523  0.8456  3.0234  3.8123  0.0123  -9.7234
+0.033  0.1512  0.9234  3.0145  3.4891  -0.0234  -9.8123
+...
+```
+
+**Figures Generated**:
+1. `fig1_posicion_velocidad.png` - x(t), y(t), vx(t), vy(t) with fits
+2. `fig2_trayectoria.png` - x-y trajectory with parabola and annotations
+3. `fig3_aceleracion.png` - ax(t), ay(t) showing constant g
+4. `fig4_rapidez_angulo.png` - Speed and angle vs time
+5. `fig5_resumen.png` - Text summary of results
+
+### Example Results
+
+```
+==========================================================
+  RESULTADOS — MOVIMIENTO PARABÓLICO
+==========================================================
+  Posición inicial     : x₀=0.0523 m  y₀=0.8456 m
+  Velocidad inicial    : vx₀=3.0234 m/s  vy₀=3.8123 m/s
+  Rapidez inicial  v₀  : 4.8234 m/s
+  Ángulo de lanzamiento: 52.34°
+  g (ajuste parabólico): 9.7543 m/s²  ± 0.2134
+  g (deriv. aceleración): 9.6823 m/s²
+  Tiempo de vuelo      : 0.7812 s  (estimado)
+  Alcance horizontal   : 2.3891 m  (estimado)
+  Altura máxima        : 1.5923 m  (en t=0.3906 s)
+==========================================================
+```
+
+## Visualization
+
+### Trajectory Plot with Annotations
+
+Comprehensive x-y plot (`analisis.py:424-455`):
+
+```python
+fig2, ax2 = plt.subplots(figsize=(10, 6))
+
+# Data points colored by time
+sc = ax2.scatter(x_raw, y_raw, c=t_raw, cmap='plasma', s=18, 
+                 alpha=0.85, zorder=3, label='Datos')
+plt.colorbar(sc, ax=ax2, label='t (s)')
+
+# Fitted parabola
+if ajuste_x_ok and ajuste_y_ok:
+    x_fit_curve = tray_x(t_fine, x0_fit, vx0_fit)
+    y_fit_curve = tray_y(t_fine, y0_fit, vy0_fit, g_fit)
+    ax2.plot(x_fit_curve, y_fit_curve, '--', lw=2, color='white',
+             label=f'Parábola ajustada  g={g_fit:.3f} m/s²')
+
+# Launch point
+ax2.plot(x0_fit, y0_fit, 'g^', ms=12, 
+         label=f'Lanzamiento ({x0_fit:.2f}, {y0_fit:.2f}) m')
+
+# Apogee
+x_apogeo_m = x0_fit + vx0_fit * t_apogeo
+ax2.plot(x_apogeo_m, y_max, 'y*', ms=14, 
+         label=f'Apogeo ({x_apogeo_m:.2f}, {y_max:.2f}) m')
+
+# Initial velocity vector
+escala_v = 0.15
+ax2.annotate("", xy=(x0_fit + escala_v*vx0_fit, y0_fit + escala_v*vy0_fit),
+             xytext=(x0_fit, y0_fit),
+             arrowprops=dict(arrowstyle='->', color='lime', lw=2))
+ax2.text(x0_fit + escala_v*vx0_fit + 0.01, y0_fit + escala_v*vy0_fit,
+         f"v₀={v0_fit:.2f} m/s\n{angulo_fit:.1f}°", 
+         color='lime', fontsize=9)
+
+ax2.set_aspect('equal')
+```
+
+### Velocity Components
+
+Verify theoretical predictions (`analisis.py:384-419`):
+
+```python
+fig1, axs = plt.subplots(2, 2, figsize=(14, 9))
+
+# vx(t) - should be constant
+axs[1,0].plot(t_raw, vx, lw=2, color='#7FFF00')
+axs[1,0].axhline(vx0_fit, color='white', lw=1, linestyle='--',
+                 label=f'vx₀={vx0_fit:.3f} m/s')
+axs[1,0].set_title("Velocidad X vs Tiempo")
+
+# vy(t) - should be linear
+axs[1,1].plot(t_raw, vy, lw=2, color='#FFD700')
+axs[1,1].axhline(0, color='gray', lw=0.5, linestyle=':')
+axs[1,1].axvline(t_apogeo, color='yellow', lw=1, linestyle=':',
+                 label=f'Apogeo (vy=0)')
+axs[1,1].set_title("Velocidad Y vs Tiempo")
+```
+
+### Acceleration Verification
+
+Check for constant g (`analisis.py:457-476`):
+
+```python
+fig3, (ax3a, ax3b) = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+
+# ax should be ≈ 0
+ax3a.plot(t_raw, ax_arr, lw=1.8, color='#00BFFF')
+ax3a.axhline(0, color='gray', lw=0.5, linestyle=':')
+ax3a.set_title("Aceleración X (debe ser ≈ 0)")
+
+# ay should be ≈ -g
+ax3b.plot(t_raw, ay_arr, lw=1.8, color='#FF6347')
+ax3b.axhline(-g_fit, color='white', lw=1.5, linestyle='--',
+             label=f'−g_ajuste = −{g_fit:.3f} m/s²')
+ax3b.axhline(-g_medio, color='yellow', lw=1.2, linestyle=':',
+             label=f'−g_medio  = −{g_medio:.3f} m/s²')
+ax3b.set_title("Aceleración Y (debe ser ≈ −g)")
+```
+
+## Verification Checks
+
+### Energy Conservation
+
+Calculate total mechanical energy:
+
+```python
+import numpy as np
+
+m = 0.145  # projectile mass (kg), measured
+g = 9.8
+
+# Kinetic energy
+KE = 0.5 * m * (vx**2 + vy**2)
+
+# Potential energy (relative to launch height)
+PE = m * g * (y_raw - y_raw[0])
+
+# Total mechanical energy
+E_total = KE + PE
+
+E_initial = E_total[0]
+E_variation = (E_total - E_initial) / E_initial * 100
+
+print(f"Energy variation: {np.std(E_variation):.2f}%")
+```
+
+Expected: < 10% variation (air resistance causes energy loss).
+
+### Range Formula Validation
+
+Compare measured range to theoretical:
+
+```python
+# Theoretical range (from launch to same height)
+R_theory = v0_fit**2 * np.sin(2 * np.radians(angulo_fit)) / g_fit
+
+# Measured range
+R_measured = x_alcance - x0_fit
+
+print(f"Range (theory): {R_theory:.3f} m")
+print(f"Range (measured): {R_measured:.3f} m")
+print(f"Difference: {abs(R_theory - R_measured):.3f} m ({abs(R_theory-R_measured)/R_theory*100:.1f}%)")
+```
+
+## Tips for Best Results
+
+<AccordionGroup>
+  <Accordion title="Physical Setup">
+    - Use dense, smooth projectile (less air resistance)
+    - Consistent launch mechanism (spring launcher ideal)
+    - Launch angle between 30-60° for best visibility
+    - Avoid initial spin if possible
+    - Keep trajectory in 2D plane (minimal lateral motion)
+  </Accordion>
+  
+  <Accordion title="Reference Frame">
+    - Large rectangle (at least 1m × 1m)
+    - Rigid mounting (wall, floor, vertical board)
+    - Rectangle in same plane as trajectory
+    - Markers at exact corners (sharp, well-defined)
+    - All 4 markers visible throughout flight
+  </Accordion>
+  
+  <Accordion title="Camera">
+    - High frame rate (60+ FPS ideal, 30 acceptable)
+    - Fast shutter speed to minimize motion blur
+    - Wide angle to capture full trajectory
+    - Good lighting, avoid shadows
+    - Fixed focus (auto-focus can drift)
+  </Accordion>
+  
+  <Accordion title="Analysis">
+    - Mark launch frame precisely (just before release)
+    - Mark landing frame (first contact or peak before landing)
+    - Include apogee in frame selection
+    - Verify homography works throughout (check OK status)
+  </Accordion>
+</AccordionGroup>
+
+## Common Error Sources
+
+| Error Source | Effect | Mitigation |
+|--------------|--------|------------|
+| Air resistance | Lower range, asymmetric trajectory | Use dense projectile, low speeds |
+| Perspective distortion | Non-parabolic fit | Proper homography, camera perpendicular |
+| Motion blur | Position uncertainty | Faster shutter, lower speed launch |
+| Timing errors | Incorrect velocities/accelerations | Higher FPS, precise frame marking |
+| Reference measurement | Systematic scale error | Precise dimension measurement |
+
+## Advanced Analysis
+
+### Drag Force Modeling
+
+For higher speeds, include air resistance:
+
+$$F_d = -\frac{1}{2}\rho C_d A v^2 \hat{v}$$
+
+Where:
+- $\rho$ is air density (≈ 1.2 kg/m³)
+- $C_d$ is drag coefficient (≈ 0.47 for sphere)
+- $A$ is cross-sectional area
+
+Compare measured trajectory to drag-free parabola to estimate drag.
+
+### Optimal Launch Angle
+
+Theoretically (no drag): $\theta_{opt} = 45°$
+
+With drag: $\theta_{opt} < 45°$ (depends on speed)
+
+Test multiple angles to find experimental optimum.
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Homography fails | Larger markers, better contrast, cleaner edges |
+| Projectile lost | Use brighter color, reduce blur, slower launch |
+| Non-parabolic fit | Check for spin, lateral motion, or obstruction |
+| g value wrong | Verify rectangle dimensions, check calibration |
+| High vx variation | Indicates lateral motion or camera not perpendicular |
+
+## Extensions
+
+<CardGroup cols={2}>
+  <Card title="Different Launch Angles" icon="angle">
+    Study how angle affects range and height
+  </Card>
+  
+  <Card title="Air Resistance Effects" icon="wind">
+    Compare projectiles of different masses/sizes
+  </Card>
+  
+  <Card title="3D Trajectories" icon="cube">
+    Use two cameras for stereoscopic tracking
+  </Card>
+  
+  <Card title="Optimal Angle Experiment" icon="bullseye">
+    Find experimental optimum for max range
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Kinematics Experiment" icon="gauge-simple-high" href="/experiments/kinematics">
+    Study 1D motion in detail
+  </Card>
+  
+  <Card title="Data Analysis Guide" icon="chart-line" href="/guides/data-analysis">
+    Quantify measurement uncertainties
+  </Card>
+</CardGroup>

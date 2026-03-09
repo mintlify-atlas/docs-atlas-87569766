@@ -1,0 +1,396 @@
+---
+title: Oscilloscope Circuit
+description: ESP32 ADC-based dual-channel oscilloscope with real-time sampling
+---
+
+## Overview
+
+The PhysisLab oscilloscope is a dual-channel, high-speed data acquisition system built around the ESP32's ADC (Analog-to-Digital Converter). It provides real-time voltage measurement and streaming capabilities for visualizing electrical signals in educational and experimental contexts.
+
+## Circuit Design
+
+### Component List
+
+- **Microcontroller**: ESP32 development board (DevKit V1 or similar)
+- **ADC Channels**: 2x built-in 12-bit ADC inputs (GPIO 34, 35)
+- **Input Protection**: 
+  - Voltage dividers (if measuring > 3.3V)
+  - Schottky diodes for overvoltage protection (optional but recommended)
+  - Series resistors (1kΩ) for current limiting
+- **Power Supply**: 5V USB or regulated supply
+- **Connectors**: BNC connectors or terminal blocks for inputs
+
+### Pin Assignments
+
+| Function | GPIO Pin | ADC Channel | Max Input Voltage |
+|----------|----------|-------------|-------------------|
+| Channel 1 Input | GPIO 34 | ADC1_CH6 | 3.3V (with 11dB attenuation) |
+| Channel 2 Input | GPIO 35 | ADC1_CH7 | 3.3V (with 11dB attenuation) |
+
+**Important**: GPIO 34 and 35 are input-only pins and part of ADC1. ADC1 is compatible with WiFi operation, unlike ADC2 which is disabled when WiFi is active.
+
+### Circuit Connections
+
+```
+Channel 1 Input Circuit:
+┌─────────────┐
+│ Signal In   │
+└──────┬──────┘
+       │
+      ┌┴┐ 1kΩ (current limiting)
+      └┬┘
+       ├─────────→ GPIO 34 (ADC1_CH6)
+       │
+      ═╪═ 100nF (noise filtering, optional)
+       │
+      GND
+
+Channel 2 Input Circuit:
+┌─────────────┐
+│ Signal In   │
+└──────┬──────┘
+       │
+      ┌┴┐ 1kΩ (current limiting)
+      └┬┘
+       ├─────────→ GPIO 35 (ADC1_CH7)
+       │
+      ═╪═ 100nF (noise filtering, optional)
+       │
+      GND
+
+ESP32 Power:
+├── VIN → 5V USB
+├── GND → Common ground (shared with signal grounds)
+└── 3.3V → Reference (do not draw current)
+```
+
+### Input Protection Circuit (Recommended)
+
+For measuring signals > 3.3V, use a voltage divider:
+
+```
+Signal In (up to 15V)
+       │
+      ┌┴┐ R1 = 10kΩ
+      └┬┘
+       ├─────────→ GPIO 34/35
+      ┌┴┐ R2 = 3.3kΩ
+      └┬┘
+       │
+      GND
+
+Attenuation Factor = (R1 + R2) / R2 = 4.03:1
+Max Safe Input = 3.3V × 4.03 = 13.3V
+```
+
+## Electrical Specifications
+
+### ADC Specifications
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Resolution | 12 bits | 0-4095 digital output |
+| ADC Channels | 2 (GPIO 34, 35) | Part of ADC1 unit |
+| Maximum Sample Rate | 100-200 samples/second per channel | Limited by Serial/WiFi bandwidth |
+| Hardware Sample Rate | Up to 200 kHz | Single-shot mode |
+| Input Voltage Range (11dB) | 0V - 3.3V | With attenuation |
+| Input Voltage Range (6dB) | 0V - 2.2V | Better linearity |
+| Input Voltage Range (2.5dB) | 0V - 1.5V | Better linearity |
+| Input Voltage Range (0dB) | 0V - 1.0V | Best linearity |
+| Input Impedance | ~50 MΩ | Very high impedance |
+| ADC Non-linearity | ±2% FSR | Typical for ESP32 |
+
+### Power Requirements
+
+- **Operating Voltage**: 5V USB (regulated to 3.3V internally)
+- **Current Consumption (Serial mode)**: ~80-120mA
+- **Current Consumption (WiFi mode)**: ~120-240mA (peaks during transmission)
+- **Recommended Power Supply**: 5V @ 500mA minimum
+
+### Timing Specifications
+
+| Mode | Sample Rate | Interval | Notes |
+|------|-------------|----------|-------|
+| Serial Streaming | 200 Hz | 5ms | GENERADOR_OSCILOSCOPIO.ino |
+| WiFi Streaming | 100 Hz | 10ms | OSC_GEN.ino |
+| Maximum Hardware | 200 kHz | 5μs | Single channel, no streaming |
+
+## Firmware Implementation
+
+### Serial-Based Oscilloscope
+
+This implementation streams ADC data over USB serial at 200 samples/second:
+
+```cpp
+#include <Arduino.h>
+
+#define ADC1_PIN 34
+#define ADC2_PIN 35
+#define ADC_READ_INTERVAL_US (1000000 / 200)  // 200 samples per second
+
+volatile bool adcStreaming = false;
+unsigned long lastAdcMicros = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  // Configure ADC resolution and attenuation
+  analogReadResolution(12);       // 12-bit resolution (0-4095)
+  analogSetAttenuation(ADC_11db); // 0-3.3V range
+
+  Serial.println("Oscilloscope Ready");
+  Serial.println("Commands: ADC START, ADC STOP");
+}
+
+void loop() {
+  // Command processing
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd == "ADC START") {
+      adcStreaming = true;
+      Serial.println("ADC STREAMING STARTED");
+    } 
+    else if (cmd == "ADC STOP") {
+      adcStreaming = false;
+      Serial.println("ADC STREAMING STOPPED");
+    }
+  }
+
+  // ADC streaming loop
+  if (adcStreaming) {
+    unsigned long now = micros();
+    if (now - lastAdcMicros >= ADC_READ_INTERVAL_US) {
+      lastAdcMicros = now;
+
+      int adc1 = analogRead(ADC1_PIN);
+      int adc2 = analogRead(ADC2_PIN);
+
+      // Output format: S,channel1,channel2
+      Serial.print("S,");
+      Serial.print(adc1);
+      Serial.print(",");
+      Serial.println(adc2);
+    }
+  }
+}
+```
+
+### WiFi-Based Oscilloscope with Circular Buffer
+
+For wireless operation, the system uses a circular buffer to handle timing variations:
+
+```cpp
+#include <Arduino.h>
+#include <WiFi.h>
+
+#define ADC_CH1_PIN 34   // GPIO34 = ADC1_CH6
+#define ADC_CH2_PIN 35   // GPIO35 = ADC1_CH7
+
+#define ADC_SAMPLE_RATE 100
+#define ADC_TIMER_INTERVAL_US (1000000 / ADC_SAMPLE_RATE)
+#define ADC_BUFFER_SIZE 512
+
+// Circular buffer structure for each ADC channel
+typedef struct {
+  uint8_t  pin;
+  uint16_t buffer[ADC_BUFFER_SIZE];
+  volatile uint16_t writeIdx;
+  volatile uint16_t readIdx;
+  volatile uint16_t count;
+} AdcChannel;
+
+AdcChannel adc1 = {ADC_CH1_PIN, {}, 0, 0, 0};
+AdcChannel adc2 = {ADC_CH2_PIN, {}, 0, 0, 0};
+
+hw_timer_t* adcTimer = nullptr;
+volatile bool adcSampleReady = false;
+volatile bool adcEnabled = false;
+
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+// Timer ISR - triggers ADC sampling
+void IRAM_ATTR onAdcTimer() {
+  adcSampleReady = true;
+}
+
+// Push sample to circular buffer
+inline void pushSample(AdcChannel* ch, uint16_t val) {
+  ch->buffer[ch->writeIdx] = val;
+  ch->writeIdx = (ch->writeIdx + 1) % ADC_BUFFER_SIZE;
+  if (ch->count < ADC_BUFFER_SIZE) {
+    ch->count++;
+  } else {
+    // Buffer full: advance readIdx (circular overwrite)
+    ch->readIdx = (ch->readIdx + 1) % ADC_BUFFER_SIZE;
+  }
+}
+
+// Pop sample from circular buffer
+inline bool popSample(AdcChannel* ch, uint16_t* out) {
+  if (ch->count == 0) return false;
+  *out = ch->buffer[ch->readIdx];
+  ch->readIdx = (ch->readIdx + 1) % ADC_BUFFER_SIZE;
+  ch->count--;
+  return true;
+}
+
+void initAdcTimer() {
+  analogReadResolution(12);       // 12 bits → 0..4095
+  analogSetAttenuation(ADC_11db); // range 0..3.3V
+
+  // Timer 3 to avoid collision with DAC timers (0 and 2)
+  adcTimer = timerBegin(3, 80, true);  // 80 MHz / 80 = 1 MHz
+  timerAttachInterrupt(adcTimer, &onAdcTimer, true);
+  timerAlarmWrite(adcTimer, ADC_TIMER_INTERVAL_US, true);
+  timerAlarmEnable(adcTimer);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  initAdcTimer();
+
+  // WiFi setup (configure your credentials)
+  WiFi.begin("your_ssid", "your_password");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected");
+  Serial.println(WiFi.localIP());
+}
+
+void loop() {
+  // ADC sampling triggered by timer ISR
+  if (adcSampleReady) {
+    adcSampleReady = false;
+
+    if (adcEnabled) {
+      // Read ADC values (safe to do outside ISR)
+      uint16_t v1 = analogRead(ADC_CH1_PIN);
+      uint16_t v2 = analogRead(ADC_CH2_PIN);
+
+      pushSample(&adc1, v1);
+      pushSample(&adc2, v2);
+    }
+  }
+
+  // Send buffered samples to client
+  // (WiFi client handling code omitted for brevity)
+}
+```
+
+## ADC Configuration and Sampling
+
+### Resolution Configuration
+
+```cpp
+analogReadResolution(12);  // 12-bit ADC: values 0-4095
+```
+
+The ESP32 has a 12-bit SAR ADC that can be configured for different resolutions:
+- 12-bit: 0-4095 (default)
+- 11-bit: 0-2047
+- 10-bit: 0-1023
+- 9-bit: 0-511
+
+### Attenuation Settings
+
+```cpp
+analogSetAttenuation(ADC_11db);  // 0-3.3V input range
+```
+
+| Attenuation | Input Range | Best Use Case |
+|-------------|-------------|---------------|
+| ADC_0db | 0 - 1.0V | Low voltage, best linearity |
+| ADC_2_5db | 0 - 1.5V | Mid-range, good linearity |
+| ADC_6db | 0 - 2.2V | Higher voltage, acceptable linearity |
+| ADC_11db | 0 - 3.3V | Maximum range, reduced linearity |
+
+### Sampling Rate Considerations
+
+1. **Hardware Limit**: ESP32 ADC can sample up to ~200 kHz in single-shot mode
+2. **Streaming Limit**: USB Serial bandwidth limits practical rate to ~200 Hz for dual channel
+3. **WiFi Limit**: Network latency limits practical rate to ~100 Hz for dual channel
+4. **Accuracy Trade-off**: Faster sampling reduces settling time, may decrease accuracy
+
+## Input Voltage Range and Protection
+
+### Safe Operating Range
+
+- **Absolute Maximum**: 3.6V (above this may damage ESP32)
+- **Recommended Maximum**: 3.3V with 11dB attenuation
+- **Minimum Voltage**: 0V (GND)
+
+### Protection Strategies
+
+1. **Series Resistor** (1kΩ): Limits current in case of overvoltage
+2. **Voltage Divider**: Scales down higher voltages to safe range
+3. **Schottky Diode Clamp**: 
+   ```
+   GPIO Pin ──┬── Schottky Diode to 3.3V (cathode to 3.3V)
+              │
+              └── Schottky Diode to GND (anode to GND)
+   ```
+4. **Capacitive Filter**: 100nF cap to GND reduces high-frequency noise
+
+### Measurement Range Extensions
+
+For measuring AC signals centered around 1.65V (half of 3.3V):
+
+```cpp
+// Convert ADC reading to voltage
+float voltage = (adcValue / 4095.0) * 3.3;  // 0-3.3V
+
+// For AC signals centered at 1.65V
+float acVoltage = voltage - 1.65;  // -1.65V to +1.65V
+```
+
+## Performance Characteristics
+
+### Frequency Response
+
+- **DC to ~5 kHz**: Excellent accuracy with 200 Hz sampling
+- **5 kHz to 20 kHz**: Aliasing possible, use higher sample rates
+- **Above 20 kHz**: Requires hardware sampling (no real-time streaming)
+
+### Accuracy and Calibration
+
+- **Typical Error**: ±2% FSR (Full Scale Range)
+- **Non-linearity**: ±2% (especially at extremes with 11dB attenuation)
+- **Noise Floor**: ~10-20 mV RMS
+- **Calibration**: Use known reference voltage for offset/gain correction
+
+```cpp
+// Simple calibration example
+float calibratedVoltage = (rawADC * gain) + offset;
+```
+
+## Applications
+
+- **Waveform Visualization**: View AC/DC signals in real-time
+- **Sensor Data Acquisition**: Record analog sensor outputs
+- **Circuit Debugging**: Measure voltages in prototype circuits
+- **Physics Experiments**: Capture transient signals
+- **Signal Analysis**: FFT, frequency measurement, etc.
+
+## Troubleshooting
+
+| Issue | Possible Cause | Solution |
+|-------|----------------|----------|
+| Reading stuck at 4095 | Input voltage too high | Check input protection, reduce voltage |
+| Reading stuck at 0 | No signal or bad connection | Verify wiring, check ground |
+| Noisy readings | Poor grounding or interference | Add 100nF filter cap, improve ground |
+| WiFi not working | Using ADC2 pins | Use only GPIO 34/35 (ADC1) |
+| Low sample rate | Baud rate too low | Increase to 115200 or use WiFi |
+| Non-linear response | Wrong attenuation | Use lower attenuation for better linearity |
+
+## Source Code Location
+
+Complete oscilloscope firmware implementations:
+- `source/osciloscopioygeneradordeSeñales/Serial/GENERADOR_OSCILOSCOPIO/GENERADOR_OSCILOSCOPIO.ino` (Serial version)
+- `source/osciloscopioygeneradordeSeñales/websocket/OSC_GEN/OSC_GEN.ino` (WiFi version with circular buffer)

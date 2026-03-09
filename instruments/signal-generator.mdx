@@ -1,0 +1,717 @@
+---
+title: 'Dual-Channel Signal Generator'
+description: 'ESP32 DAC-based arbitrary waveform generator with DDS architecture'
+---
+
+## Overview
+
+The PhysisLab signal generator is a dual-channel arbitrary waveform generator built using the ESP32's internal 8-bit DAC. It implements Direct Digital Synthesis (DDS) with phase accumulators, providing stable and accurate waveforms up to 10 kHz.
+
+<Frame>
+  <img src="/images/signal-generator.png" alt="Signal Generator" />
+</Frame>
+
+## Hardware Configuration
+
+### DAC Specifications
+
+<CardGroup cols={2}>
+  <Card title="Resolution" icon="ruler">
+    8-bit (0-255)
+  </Card>
+  
+  <Card title="Output Range" icon="bolt">
+    0 - 3.3V
+  </Card>
+  
+  <Card title="Sample Rate" icon="clock">
+    40 kHz per channel
+  </Card>
+  
+  <Card title="Channels" icon="layer-group">
+    2 independent outputs
+  </Card>
+</CardGroup>
+
+### Pin Configuration
+
+| Channel | GPIO Pin | DAC Channel | Max Frequency |
+|---------|----------|-------------|---------------|
+| CH1 | GPIO 25 | DAC_CHANNEL_1 | ~10 kHz |
+| CH2 | GPIO 26 | DAC_CHANNEL_2 | ~10 kHz |
+
+<Info>
+Both DAC outputs can drive loads up to 10 mA. For higher current requirements, add a buffer amplifier (e.g., op-amp follower).
+</Info>
+
+## DDS Architecture
+
+### Principle of Operation
+
+Direct Digital Synthesis uses a phase accumulator to index into a wavetable:
+
+```mermaid
+graph LR
+    A[Phase Accumulator] -->|Index| B[Wavetable 256 samples]
+    C[Phase Step] -->|Add| A
+    B --> D[DAC Output]
+    E[Timer 40kHz] -->|Trigger| C
+```
+
+### Phase Accumulator Math
+
+The phase step determines output frequency:
+
+```cpp
+// Formula: phase_step = (freq × table_size × 65536) / sample_rate
+phaseStep = (uint32_t)((freq * 256 * 65536.0) / 40000);
+```
+
+**Example**: For 1 kHz output at 40 kHz sample rate:
+```
+phase_step = (1000 × 256 × 65536) / 40000 = 419,430,400
+```
+
+With each 40 kHz tick:
+- Phase accumulator increments by 419,430,400
+- Upper 8 bits (index) cycle through wavetable ~1000 times per second
+
+## ESP32 Firmware
+
+The signal generator firmware is in `Generador_Senales_Serial.ino`:
+
+### Channel Structure
+
+```cpp Generador_Senales_Serial.ino
+typedef struct {
+  uint8_t dacPin;                    // GPIO pin (25 or 26)
+  
+  volatile uint32_t phaseAcc;        // 32-bit phase accumulator
+  volatile uint32_t phaseStep;       // Frequency control
+  volatile bool enabled;             // Channel on/off
+  
+  uint8_t waveTableA[256];          // Double buffering for
+  uint8_t waveTableB[256];          // glitch-free updates
+  volatile uint8_t* activeWaveTable; // Currently active table
+  
+  hw_timer_t* timer;                // Dedicated hardware timer
+  portMUX_TYPE mux;                 // Critical section protection
+} SignalChannel;
+
+// Two independent channels
+SignalChannel ch1 = { DAC1_PIN, 0, 0, false, {}, {}, nullptr, nullptr,
+                      portMUX_INITIALIZER_UNLOCKED };
+SignalChannel ch2 = { DAC2_PIN, 0, 0, false, {}, {}, nullptr, nullptr,
+                      portMUX_INITIALIZER_UNLOCKED };
+```
+
+### Waveform Generation
+
+Waveforms are pre-computed into 256-sample lookup tables:
+
+```cpp Generador_Senales_Serial.ino
+void generateWaveToTable(uint8_t* table, const char* type, 
+                        float amplitude, float offset) {
+  amplitude = constrain(amplitude, 0, 255);
+  offset = constrain(offset, 0, 255);
+  
+  for (int i = 0; i < 256; i++) {
+    float val = 0;
+    float angle = (2.0 * PI * i) / 256.0;
+    
+    if (strcmp(type, "SINE") == 0) {
+      val = (sin(angle) + 1) * 0.5;  // 0 to 1
+    }
+    else if (strcmp(type, "SQUARE") == 0) {
+      val = (i < 128) ? 1.0 : 0.0;
+    }
+    else if (strcmp(type, "TRIANGLE") == 0) {
+      val = (i < 128) ? (2.0 * i / 256.0) : (2.0 - (2.0 * i / 256.0));
+    }
+    else if (strcmp(type, "SAW") == 0) {
+      val = (float)i / 256.0;
+    }
+    else if (strcmp(type, "DC") == 0) {
+      val = 0;  // DC offset only
+    }
+    
+    // Scale and offset
+    table[i] = (uint8_t)constrain((val * amplitude) + offset, 0, 255);
+  }
+}
+```
+
+### Interrupt Service Routine
+
+Each channel has a dedicated ISR triggered at 40 kHz:
+
+```cpp Generador_Senales_Serial.ino
+void IRAM_ATTR onTimerCh1() {
+  if (!ch1.enabled) return;
+  
+  // Increment phase accumulator
+  ch1.phaseAcc += ch1.phaseStep;
+  
+  // Extract index from upper 8 bits (bits 16-23)
+  uint8_t idx = ch1.phaseAcc >> 16;
+  
+  // Output sample to DAC
+  dac_output_voltage(DAC_CHANNEL_1, ch1.activeWaveTable[idx]);
+}
+
+void IRAM_ATTR onTimerCh2() {
+  if (!ch2.enabled) return;
+  
+  ch2.phaseAcc += ch2.phaseStep;
+  uint8_t idx = ch2.phaseAcc >> 16;
+  dac_output_voltage(DAC_CHANNEL_2, ch2.activeWaveTable[idx]);
+}
+```
+
+<Warning>
+ISRs marked with `IRAM_ATTR` are stored in RAM for faster execution. Keep ISR code minimal and avoid calling functions that aren't also in RAM.
+</Warning>
+
+### Timer Initialization
+
+```cpp Generador_Senales_Serial.ino
+#define SAMPLE_RATE 40000
+#define TIMER_DIVIDER 80
+#define TIMER_INTERVAL_US (1000000 / SAMPLE_RATE)  // 25 µs
+
+void initChannel(SignalChannel* ch, int timerID, void (*isr)()) {
+  // Initialize with default sine wave
+  generateWaveToTable(ch->waveTableA, "SINE", 255, 0);
+  ch->activeWaveTable = ch->waveTableA;
+  
+  // Configure hardware timer
+  ch->timer = timerBegin(timerID, TIMER_DIVIDER, true);
+  timerAttachInterrupt(ch->timer, isr, true);
+  timerAlarmWrite(ch->timer, TIMER_INTERVAL_US, true);
+  timerAlarmEnable(ch->timer);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  // Initialize both channels with different timers
+  initChannel(&ch1, 0, onTimerCh1);  // Timer 0
+  initChannel(&ch2, 2, onTimerCh2);  // Timer 2
+  
+  // Enable DAC hardware
+  dac_output_enable(DAC_CHANNEL_1);
+  dac_output_enable(DAC_CHANNEL_2);
+  
+  Serial.println("Generador listo - CH1 y CH2 totalmente independientes");
+}
+```
+
+<Info>
+ESP32 has 4 hardware timers (0-3). We use timers 0 and 2 for the signal generator, leaving 1 and 3 available for other purposes.
+</Info>
+
+## Command Protocol
+
+### Serial Command Format
+
+```
+CH<channel> <waveform> <frequency> <enable> <amplitude> <offset>
+```
+
+**Parameters**:
+- `channel`: 1 or 2
+- `waveform`: SINE, SQUARE, TRIANGLE, SAW, or DC
+- `frequency`: Hz (float, 0.1 - 10000)
+- `enable`: 0 (off) or 1 (on)
+- `amplitude`: 0-255 (DAC units)
+- `offset`: 0-255 (DAC units)
+
+### Command Examples
+
+<CodeGroup>
+```bash Pure Sine Wave
+CH1 SINE 1000 1 200 50
+# Channel 1: 1kHz sine, enabled, amplitude=200, offset=50
+```
+
+```bash Full Amplitude Square
+CH2 SQUARE 500 1 255 0
+# Channel 2: 500Hz square, full amplitude, no offset
+```
+
+```bash Triangle with Offset
+CH1 TRIANGLE 100 1 150 100
+# Channel 1: 100Hz triangle, amplitude=150, offset=100
+```
+
+```bash DC Level
+CH2 DC 0 1 0 128
+# Channel 2: DC output at ~1.65V (128/255 × 3.3V)
+```
+
+```bash Disable Channel
+CH1 SINE 1000 0 200 50
+# Keep settings but disable output
+```
+</CodeGroup>
+
+### Command Processing
+
+```cpp Generador_Senales_Serial.ino
+void processCommand(String cmd) {
+  int channel;
+  char wave[10];
+  float freq;
+  int enable;
+  float amplitude;
+  float offset;
+  
+  // Parse command string
+  if (sscanf(cmd.c_str(), "CH%d %s %f %d %f %f",
+             &channel, wave, &freq, &enable, &amplitude, &offset) != 6)
+    return;
+  
+  SignalChannel* ch = (channel == 1) ? &ch1 : &ch2;
+  
+  // Generate new wavetable in inactive buffer (glitch-free)
+  uint8_t* newTable = (ch->activeWaveTable == ch->waveTableA) ?
+                      ch->waveTableB : ch->waveTableA;
+  generateWaveToTable(newTable, wave, amplitude, offset);
+  
+  // Critical section: update all parameters atomically
+  portENTER_CRITICAL(&ch->mux);
+  ch->enabled = false;                          // Stop output momentarily
+  ch->phaseAcc = 0;                            // Reset phase
+  ch->phaseStep = (uint32_t)((freq * 256 * 65536.0) / 40000);
+  ch->activeWaveTable = newTable;              // Switch to new table
+  ch->enabled = (bool)enable;
+  portEXIT_CRITICAL(&ch->mux);
+}
+
+void loop() {
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd.length() > 0) {
+      processCommand(cmd);
+      Serial.println("OK");
+    }
+  }
+}
+```
+
+## Waveform Types
+
+### Sine Wave
+
+```cpp
+val = (sin(angle) + 1) * 0.5;  // Range: 0 to 1
+```
+
+<CardGroup cols={2}>
+  <Card title="Use Cases" icon="wave-sine">
+    - Audio testing
+    - Filter characterization
+    - Phase measurements
+    - Harmonic analysis
+  </Card>
+  
+  <Card title="Characteristics" icon="chart-line">
+    - Pure fundamental frequency
+    - Low THD (< 3%)
+    - Smooth continuous waveform
+    - No high-frequency content
+  </Card>
+</CardGroup>
+
+### Square Wave
+
+```cpp
+val = (i < 128) ? 1.0 : 0.0;  // 50% duty cycle
+```
+
+<CardGroup cols={2}>
+  <Card title="Use Cases" icon="square">
+    - Clock signal generation
+    - Digital circuit testing
+    - PWM simulation
+    - Logic level verification
+  </Card>
+  
+  <Card title="Characteristics" icon="chart-line">
+    - Sharp rising/falling edges
+    - Rich harmonic content (odd harmonics)
+    - 50% duty cycle
+    - Good for frequency counters
+  </Card>
+</CardGroup>
+
+### Triangle Wave
+
+```cpp
+val = (i < 128) ? (2.0 * i / 256.0) : (2.0 - (2.0 * i / 256.0));
+```
+
+<CardGroup cols={2}>
+  <Card title="Use Cases" icon="triangle">
+    - Voltage sweeps
+    - Modulation signals
+    - Ramp testing
+    - Integration/differentiation demos
+  </Card>
+  
+  <Card title="Characteristics" icon="chart-line">
+    - Linear rise and fall
+    - Lower harmonic content than square
+    - Symmetrical waveform
+    - Good for audio synthesis
+  </Card>
+</CardGroup>
+
+### Sawtooth Wave
+
+```cpp
+val = (float)i / 256.0;  // Linear ramp 0 to 1
+```
+
+<CardGroup cols={2}>
+  <Card title="Use Cases" icon="chart-line">
+    - Oscilloscope timebase
+    - Voltage-controlled oscillators
+    - Sweep generators
+    - Display synchronization
+  </Card>
+  
+  <Card title="Characteristics" icon="wave-square">
+    - Linear rise, instant fall
+    - All harmonic frequencies present
+    - Asymmetric waveform
+    - Rich frequency spectrum
+  </Card>
+</CardGroup>
+
+## Amplitude and Offset Control
+
+### Voltage Calculation
+
+The output voltage is determined by:
+
+```
+V_out = (DAC_value / 255) × 3.3V
+```
+
+For a waveform with amplitude `A` and offset `O`:
+
+```
+DAC_value = (waveform × A) + O
+```
+
+### Examples
+
+<AccordionGroup>
+  <Accordion title="Full Swing (0-3.3V)">
+    ```bash
+    CH1 SINE 1000 1 255 0
+    ```
+    - Amplitude: 255 (full scale)
+    - Offset: 0 (start at 0V)
+    - Output: 0V to 3.3V
+  </Accordion>
+  
+  <Accordion title="Centered Sine (0.8V - 2.5V)">
+    ```bash
+    CH1 SINE 1000 1 128 64
+    ```
+    - Amplitude: 128 (half scale)
+    - Offset: 64 (center at ~1.65V)
+    - Output: ~0.8V to ~2.5V
+  </Accordion>
+  
+  <Accordion title="Small Signal (1.5V - 1.8V)">
+    ```bash
+    CH1 SINE 1000 1 20 115
+    ```
+    - Amplitude: 20 (small)
+    - Offset: 115 (center at ~1.65V)
+    - Output: ~1.5V to ~1.8V
+  </Accordion>
+  
+  <Accordion title="DC Voltage (1.65V constant)">
+    ```bash
+    CH1 DC 0 1 0 128
+    ```
+    - Amplitude: 0 (no AC component)
+    - Offset: 128 (1.65V)
+    - Output: 1.65V constant
+  </Accordion>
+</AccordionGroup>
+
+## Frequency Range and Resolution
+
+### Frequency Limits
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Minimum Frequency | 0.1 Hz | Limited by 32-bit phase accumulator |
+| Maximum Frequency | ~10 kHz | Nyquist limit (40 kHz / 4 samples) |
+| Recommended Max | 5 kHz | For clean waveforms (8 samples/cycle) |
+| Frequency Resolution | ~0.001 Hz | From phase step calculation |
+
+### Samples Per Cycle
+
+At 40 kHz sample rate:
+
+| Frequency | Samples/Cycle | Quality |
+|-----------|---------------|----------|
+| 100 Hz | 400 | Excellent |
+| 1 kHz | 40 | Very Good |
+| 5 kHz | 8 | Good (minimum recommended) |
+| 10 kHz | 4 | Marginal |
+| 20 kHz | 2 | Poor (Nyquist limit) |
+
+<Warning>
+Above 5 kHz, waveforms become increasingly distorted due to aliasing. For best results, stay below 5 kHz output frequency.
+</Warning>
+
+## Python Control Interface
+
+Send commands from Python using pyserial:
+
+```python
+import serial
+import time
+
+# Open serial connection
+ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+time.sleep(2)  # Wait for ESP32 reset
+
+def set_waveform(channel, waveform, freq, enable=1, amplitude=255, offset=0):
+    """Configure signal generator channel."""
+    cmd = f"CH{channel} {waveform} {freq} {enable} {amplitude} {offset}\n"
+    ser.write(cmd.encode())
+    response = ser.readline().decode().strip()
+    return response == "OK"
+
+# Examples
+set_waveform(1, "SINE", 1000, 1, 200, 50)      # CH1: 1kHz sine
+set_waveform(2, "SQUARE", 500, 1, 255, 0)      # CH2: 500Hz square
+
+time.sleep(5)
+
+# Update frequency while running
+for freq in range(100, 2000, 100):
+    set_waveform(1, "SINE", freq, 1, 200, 50)
+    time.sleep(0.1)
+
+ser.close()
+```
+
+## Advanced Applications
+
+### Dual-Tone Generation
+
+Generate two independent frequencies simultaneously:
+
+```python
+# Audio DTMF tone: 697 Hz + 1209 Hz
+set_waveform(1, "SINE", 697, 1, 128, 0)
+set_waveform(2, "SINE", 1209, 1, 128, 0)
+```
+
+Mix the outputs with resistors:
+```
+CH1 ----[1k]----+---- Output
+                |
+CH2 ----[1k]----+
+```
+
+### AM Modulation Simulation
+
+Use CH2 as a slow envelope for CH1:
+
+```python
+set_waveform(1, "SINE", 5000, 1, 255, 0)     # 5kHz carrier
+set_waveform(2, "SINE", 100, 1, 100, 128)    # 100Hz modulation
+```
+
+Implement analog multiplier with external circuitry.
+
+### Frequency Sweep
+
+```python
+import numpy as np
+
+# Logarithmic sweep from 10 Hz to 10 kHz
+for freq in np.logspace(1, 4, 100):  # 100 steps
+    set_waveform(1, "SINE", freq, 1, 200, 50)
+    time.sleep(0.1)
+```
+
+### Arbitrary Waveform
+
+Modify firmware to load custom wavetables:
+
+```cpp
+// Custom waveform: half-sine rectified
+void generateHalfSine(uint8_t* table) {
+  for (int i = 0; i < 256; i++) {
+    float angle = (PI * i) / 256.0;  // 0 to π
+    float val = (i < 128) ? sin(angle) : 0.0;
+    table[i] = (uint8_t)(val * 255);
+  }
+}
+```
+
+## Performance Characteristics
+
+### Timing Accuracy
+
+- **Timer Clock**: 80 MHz / 80 = 1 MHz
+- **Timer Period**: 25 µs (40 kHz)
+- **Frequency Error**: < 0.01% (crystal oscillator stability)
+- **Phase Noise**: -80 dBc/Hz @ 1 kHz offset (typical)
+
+### Output Characteristics
+
+| Parameter | Min | Typ | Max | Units |
+|-----------|-----|-----|-----|-------|
+| Output Voltage | 0 | - | 3.3 | V |
+| Source Current | - | - | 10 | mA |
+| Output Impedance | - | 1 | - | kΩ |
+| Rise Time | - | 10 | 20 | µs |
+| THD (1 kHz sine) | - | 2 | 5 | % |
+| SNR | 35 | 40 | - | dB |
+
+<Info>
+Add an RC low-pass filter (e.g., 1kΩ + 1µF) to the DAC output to smooth the step waveform and reduce high-frequency artifacts.
+</Info>
+
+## Hardware Improvements
+
+### Output Buffer
+
+Add an op-amp buffer for higher current drive:
+
+```
+ESP32 DAC ----[100Ω]----+---- Op-Amp (+)
+                         |
+                        [10nF] (to GND)
+                         
+Op-Amp (out) ----[100Ω]---- Output
+             |
+            [10µF] (to GND)
+```
+
+**Benefits**:
+- Drive loads < 1kΩ
+- Lower output impedance
+- Better protection for ESP32
+
+### Low-Pass Filter
+
+Smooth the DAC output with a 2-pole filter:
+
+```
+DAC ----[1kΩ]----+----[1kΩ]----+---- Output
+                 |              |
+               [1µF]          [1µF]
+                 |              |
+                GND            GND
+```
+
+**Cutoff**: ~10 kHz (reduces aliasing artifacts)
+
+### Voltage Scaling
+
+Use a resistive divider or op-amp gain stage:
+
+```
+         +-- [10kΩ] --+
+         |            |
+DAC -----+            +---- Output (0-10V)
+         |            |
+         +-- [20kΩ] --+---- GND
+              (Op-amp non-inverting gain of 3)
+```
+
+## Combined Oscilloscope + Generator
+
+The `GENERADOR_OSCILOSCOPIO.ino` firmware includes both oscilloscope and generator:
+
+```cpp
+void loop() {
+  // Handle serial commands
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd == "ADC START") {
+      adcStreaming = true;
+    } 
+    else if (cmd == "ADC STOP") {
+      adcStreaming = false;
+    } 
+    else {
+      processCommand(cmd);  // Signal generator command
+    }
+  }
+  
+  // Stream ADC samples (oscilloscope)
+  if (adcStreaming) {
+    // ... ADC sampling code ...
+  }
+}
+```
+
+This allows:
+- Generate a test signal on CH1 (DAC)
+- Measure it on CH1 (ADC GPIO 34)
+- Compare input/output in real-time
+- Characterize filters and circuits
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No output on DAC pins">
+    - Verify DAC is enabled: `dac_output_enable(DAC_CHANNEL_1)`
+    - Check channel is enabled: `enable` parameter = 1
+    - Confirm timer is running: check with oscilloscope/multimeter
+    - GPIO 25/26 must not be configured as digital I/O
+  </Accordion>
+  
+  <Accordion title="Frequency is incorrect">
+    - Verify sample rate is 40 kHz (SAMPLE_RATE constant)
+    - Check timer configuration: TIMER_INTERVAL_US = 25
+    - Recalculate phase step if sample rate changed
+    - Confirm with oscilloscope or frequency counter
+  </Accordion>
+  
+  <Accordion title="Distorted waveforms">
+    - Reduce frequency (< 5 kHz for clean waveforms)
+    - Check for overloaded output (too much current draw)
+    - Add low-pass filter to smooth DAC steps
+    - Verify amplitude isn't clipping (0-255 range)
+  </Accordion>
+  
+  <Accordion title="Glitches when changing settings">
+    - This is normal - brief discontinuity during update
+    - Disable channel first: `enable = 0`
+    - Change settings
+    - Re-enable: `enable = 1`
+    - Or use fade-in/fade-out in your application
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Oscilloscope" icon="wave-square" href="/instruments/oscilloscope">
+    Measure and visualize the generated signals
+  </Card>
+  
+  <Card title="Back to Overview" icon="arrow-left" href="/instruments/overview">
+    Return to instruments overview
+  </Card>
+</CardGroup>

@@ -1,0 +1,343 @@
+---
+title: ESP32 Microcontroller
+description: ESP32 configuration and usage across PhysisLab experiments
+---
+
+## Overview
+
+The ESP32 is the primary microcontroller used in PhysisLab for real-time data acquisition, signal generation, and sensor interfacing. It provides built-in WiFi capabilities, dual-core processing, and multiple ADC/DAC channels essential for physics experiments.
+
+## Technical Specifications
+
+- **Microcontroller**: ESP32 (Xtensa dual-core)
+- **Clock Speed**: 240 MHz
+- **ADC Resolution**: 12-bit (0-4095)
+- **ADC Voltage Range**: 0-3.3V (with 11dB attenuation)
+- **DAC Resolution**: 8-bit (0-255)
+- **DAC Voltage Range**: 0-3.3V
+- **WiFi**: 802.11 b/g/n
+- **Operating Voltage**: 3.3V
+
+## GPIO Pin Configuration
+
+### ADC Pins (Analog Input)
+
+```
+GPIO 34 (ADC1_CH6) - ADC Channel 1
+GPIO 35 (ADC1_CH7) - ADC Channel 2
+```
+
+<Warning>
+**Important**: Only ADC1 channels can be used when WiFi is active. ADC2 channels (GPIO 0, 2, 4, 12-15, 25-27) are incompatible with WiFi operations.
+</Warning>
+
+### DAC Pins (Analog Output)
+
+```
+GPIO 25 - DAC Channel 1 (Signal Generator Output 1)
+GPIO 26 - DAC Channel 2 (Signal Generator Output 2)
+```
+
+### Digital I/O Pins
+
+**Free Fall Experiment**:
+```
+GPIO 18 - IR Sensor START (Input, Pull-up)
+GPIO 5  - IR Sensor END (Input, Pull-up)
+```
+
+**Ultrasonic Sensor (HC-SR04)**:
+```
+GPIO 18 - TRIG (Output)
+GPIO 19 - ECHO (Input)
+```
+
+**VL53L0X Distance Sensor**:
+```
+GPIO 21 - I2C SDA
+GPIO 22 - I2C SCL
+GPIO 27 - Interrupt Pin (Input, Pull-up)
+```
+
+## ADC Configuration
+
+### Basic Setup
+
+From `OSC_GEN.ino:143-150`:
+
+```cpp
+void initAdcTimer() {
+  analogReadResolution(12);       // 12 bits → 0..4095
+  analogSetAttenuation(ADC_11db); // rango 0..3.3V
+
+  // Timer 3 para no colisionar con timers DAC (0 y 2)
+  adcTimer = timerBegin(3, TIMER_DIVIDER, true);
+  timerAttachInterrupt(adcTimer, &onAdcTimer, true);
+  timerAlarmWrite(adcTimer, ADC_TIMER_INTERVAL_US, true);
+  timerAlarmEnable(adcTimer);
+}
+```
+
+### Sampling Configuration
+
+```cpp
+#define ADC_CH1_PIN 34   // GPIO34 = ADC1_CH6
+#define ADC_CH2_PIN 35   // GPIO35 = ADC1_CH7
+#define ADC_SAMPLE_RATE 100  // Hz
+#define ADC_TIMER_INTERVAL_US (1000000 / ADC_SAMPLE_RATE)
+```
+
+### Reading ADC Values
+
+From `OSC_GEN.ino:282-288`:
+
+```cpp
+if (adcEnabled) {
+  // analogRead fuera de ISR — seguro
+  uint16_t v1 = analogRead(ADC_CH1_PIN);
+  uint16_t v2 = analogRead(ADC_CH2_PIN);
+
+  pushSample(&adc1, v1);
+  pushSample(&adc2, v2);
+}
+```
+
+## DAC Configuration
+
+### Signal Generation Setup
+
+The ESP32 DACs are used for generating precise waveforms at up to 40 kHz sample rate.
+
+From `GENERADOR_OSCILOSCOPIO.ino:4-11`:
+
+```cpp
+#define DAC1_PIN 25
+#define DAC2_PIN 26
+
+#define SAMPLE_RATE 40000
+#define TABLE_SIZE 256
+#define TIMER_DIVIDER 80
+#define TIMER_INTERVAL_US (1000000 / SAMPLE_RATE)
+```
+
+### Waveform Generation
+
+From `OSC_GEN.ino:68-86`:
+
+```cpp
+void generateWaveToTable(uint8_t* table, const char* type, float amplitude, float offset) {
+  if (amplitude < 0) amplitude = 0;
+  if (amplitude > 255) amplitude = 255;
+  if (offset < 0) offset = 0;
+  if (offset > 255) offset = 255;
+
+  for (int i = 0; i < TABLE_SIZE; i++) {
+    float val = 0;
+    float angle = (2.0 * PI * i) / TABLE_SIZE;
+
+    if      (strcmp(type, "SINE")     == 0) val = (sin(angle) + 1) / 2;
+    else if (strcmp(type, "SQUARE")   == 0) val = (i < TABLE_SIZE / 2) ? 1.0 : 0;
+    else if (strcmp(type, "TRIANGLE") == 0) val = (i < TABLE_SIZE / 2) ? (i / 128.0 * 2 - 1) : (3 - i / 128.0 * 2);
+    else if (strcmp(type, "SAW")      == 0) val = (i / 255.0) * 2 - 1;
+    else if (strcmp(type, "DC")       == 0) val = 0;
+
+    table[i] = (uint8_t)constrain((val * amplitude) + offset, 0, 255);
+  }
+}
+```
+
+### DAC Output via ISR
+
+From `GENERADOR_OSCILOSCOPIO.ino:64-76`:
+
+```cpp
+void IRAM_ATTR onTimerCh1() {
+  if (!ch1.enabled) return;
+  ch1.phaseAcc += ch1.phaseStep;
+  uint8_t idx = ch1.phaseAcc >> 16;
+  dac_output_voltage(DAC_CHANNEL_1, ch1.activeWaveTable[idx]);
+}
+
+void IRAM_ATTR onTimerCh2() {
+  if (!ch2.enabled) return;
+  ch2.phaseAcc += ch2.phaseStep;
+  uint8_t idx = ch2.phaseAcc >> 16;
+  dac_output_voltage(DAC_CHANNEL_2, ch2.activeWaveTable[idx]);
+}
+```
+
+## Timer Configuration
+
+The ESP32 has 4 hardware timers (0-3). PhysisLab uses them for precise timing:
+
+- **Timer 0**: DAC Channel 1 (40 kHz sampling)
+- **Timer 2**: DAC Channel 2 (40 kHz sampling)
+- **Timer 3**: ADC sampling (100 Hz)
+
+From `OSC_GEN.ino:157-161`:
+
+```cpp
+ch1.timer = timerBegin(0, TIMER_DIVIDER, true);
+timerAttachInterrupt(ch1.timer, &onTimerCh1, true);
+timerAlarmWrite(ch1.timer, TIMER_INTERVAL_US, true);
+timerAlarmEnable(ch1.timer);
+```
+
+## Communication Modes
+
+### Serial Communication
+
+Standard serial communication at 115200 baud for oscilloscope and sensor data:
+
+```cpp
+Serial.begin(115200);
+
+// Stream ADC data
+Serial.print("S,");
+Serial.print(adc1);
+Serial.print(",");
+Serial.println(adc2);
+```
+
+### WiFi/WebSocket Mode
+
+For wireless data acquisition and signal generation control:
+
+From `OSC_GEN.ino:238-252`:
+
+```cpp
+const char* ssid = "YOUR_SSID";
+const char* password = "YOUR_PASSWORD";
+
+WiFiServer server(5000);
+
+void setup() {
+  // ... other setup ...
+  
+  WiFi.begin(ssid, password);
+  Serial.print("Conectando WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi conectado");
+  Serial.println(WiFi.localIP());
+  
+  server.begin();
+  server.setNoDelay(true);
+}
+```
+
+## FreeRTOS Integration
+
+For complex experiments requiring multi-tasking:
+
+From `FreeFallEpsfreeRTOSFunciona.ino:6-50`:
+
+```cpp
+void tareaPolling(void *param) {
+  uint8_t estadoAntInicio = HIGH;
+  uint8_t estadoAntFin    = HIGH;
+
+  uint32_t tInicio = 0;
+  uint32_t tFin    = 0;
+
+  bool esperandoFin = false;
+
+  while (true) {
+    uint8_t estadoInicio = digitalRead(PIN_INICIO);
+    uint8_t estadoFin    = digitalRead(PIN_FIN);
+    uint32_t ahora = micros();
+
+    // Captura primer tiempo
+    if (!esperandoFin && estadoAntInicio == HIGH && estadoInicio == LOW) {
+      tInicio = ahora;
+      esperandoFin = true;
+    }
+
+    // Captura segundo tiempo
+    if (esperandoFin && estadoAntFin == HIGH && estadoFin == LOW) {
+      tFin = ahora;
+      uint32_t delta = tFin - tInicio;
+      esperandoFin = false;
+      
+      Serial.print("DELTA = ");
+      Serial.print(delta);
+      Serial.println(" us");
+    }
+
+    estadoAntInicio = estadoInicio;
+    estadoAntFin    = estadoFin;
+
+    vTaskDelay(1); // 1 ms de muestreo
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(PIN_INICIO, INPUT_PULLUP);
+  pinMode(PIN_FIN, INPUT_PULLUP);
+
+  xTaskCreatePinnedToCore(
+    tareaPolling,
+    "PollingDelta",
+    2048,
+    NULL,
+    2,
+    NULL,
+    1
+  );
+}
+```
+
+## Critical Sections
+
+For thread-safe operations when sharing variables between ISRs and main code:
+
+```cpp
+portMUX_TYPE timerMux = portMUX_INITIALIZER_UNLOCKED;
+
+void updateFrequency(SignalChannel* ch, float freq) {
+  portENTER_CRITICAL(&timerMux);
+  ch->phaseStep = (uint32_t)((freq * TABLE_SIZE * 65536.0) / SAMPLE_RATE);
+  portEXIT_CRITICAL(&timerMux);
+}
+```
+
+## Power Considerations
+
+- **Operating Voltage**: 3.3V (do not apply 5V to GPIO pins)
+- **Maximum Current per GPIO**: 12 mA (use external transistors for loads > 10 mA)
+- **Total GPIO Current**: 200 mA maximum
+- **Power Supply**: Use regulated 3.3V or 5V with onboard regulator
+
+## Best Practices
+
+1. **ADC Accuracy**: Use ADC1 channels when WiFi is enabled
+2. **Timer Conflicts**: Avoid using the same timer for multiple purposes
+3. **ISR Safety**: Keep ISR code minimal; use flags to communicate with main loop
+4. **Pull-up Resistors**: Enable internal pull-ups for digital inputs (10kΩ typical)
+5. **WiFi Performance**: Disable WiFi sleep mode for real-time applications: `WiFi.setSleep(false)`
+
+## Troubleshooting
+
+### ADC Reads Zero
+- Check that ADC1 channels (GPIO 34, 35) are used with WiFi
+- Verify 11dB attenuation is set: `analogSetAttenuation(ADC_11db)`
+- Ensure input voltage is within 0-3.3V range
+
+### DAC Output Unstable
+- Use separate timers for each DAC channel (Timer 0 and Timer 2)
+- Implement double buffering for waveform tables
+- Add capacitor (10μF) on DAC output for smoothing
+
+### WiFi Connection Drops
+- Disable power saving: `WiFi.setSleep(false)`
+- Use strong WiFi signal (RSSI > -70 dBm)
+- Set TCP_NODELAY for real-time streaming: `client.setNoDelay(true)`
+
+## Related Documentation
+
+- [Sensors](/hardware/sensors)
+- [Signal Generator](/experiments/oscilloscope-generator)
+- [Free Fall Experiment](/experiments/free-fall)

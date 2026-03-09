@@ -1,0 +1,807 @@
+---
+title: 'GUI Components (PyQt5)'
+description: 'Real-time oscilloscope interface built with PyQt5 and pyqtgraph'
+---
+
+## Overview
+
+PhysisLab includes a professional oscilloscope GUI built with PyQt5 for real-time data acquisition and visualization. The interface provides dual-channel ADC monitoring, FFT analysis, and serial communication with ESP32 microcontrollers.
+
+## Main Window Class
+
+### OsciloscopioWindow
+
+Main application window with controls and plot widgets.
+
+```python
+from PyQt5.QtWidgets import QMainWindow, QWidget
+from PyQt5.QtCore import QTimer
+import pyqtgraph as pg
+from collections import deque
+
+class OsciloscopioWindow(QMainWindow):
+    def __init__(self, default_host="10.182.172.119", default_port=5000):
+        super().__init__()
+        self.setWindowTitle("ESP32 Osciloscopio")
+        self.resize(1200, 750)
+        
+        # Shared buffers for threading
+        self.buf1 = deque(maxlen=BUFFER_LEN * 4)
+        self.buf2 = deque(maxlen=BUFFER_LEN * 4)
+        
+        # Display arrays
+        self.data1 = np.zeros(BUFFER_LEN)
+        self.data2 = np.zeros(BUFFER_LEN)
+        
+        self.worker = None
+        self.signals = Signals()
+        
+        # Build user interface
+        self._build_ui(default_host, default_port)
+        
+        # Setup refresh timer
+        self.plot_timer = QTimer()
+        self.plot_timer.timeout.connect(self._update_plot)
+        self.plot_timer.start(PLOT_INTERVAL)
+```
+
+**Source:** `GUIOSCI.py:123-149`
+
+<ParamField path="default_host" type="string" default="10.182.172.119">
+  Default IP address for network connection
+</ParamField>
+
+<ParamField path="default_port" type="int" default="5000">
+  Default TCP port for connection
+</ParamField>
+
+### Constants Configuration
+
+Global settings for oscilloscope behavior.
+
+```python
+# ADC Configuration
+ADC_MAX       = 4095        # 12-bit ADC resolution
+ADC_VREF      = 3.3         # Reference voltage (V)
+SAMPLE_RATE   = 10_000      # Sampling frequency (Hz)
+BUFFER_LEN    = 2_000       # Visible samples (200 ms at 10 kHz)
+PLOT_INTERVAL = 50          # Redraw interval (ms) → ~20 fps
+
+# Color scheme
+COLORS = {
+    "CH1": "#00e5ff",      # Cyan for channel 1
+    "CH2": "#ff6d00",      # Orange for channel 2
+    "grid": "#2a2a3a",     # Dark grid
+    "bg":   "#12121f",     # Background
+    "panel":"#1a1a2e",     # Panel background
+}
+```
+
+**Source:** `GUIOSCI.py:31-42`
+
+## Serial Communication Thread
+
+### SerialWorker Class
+
+Background thread for serial data acquisition.
+
+```python
+import threading
+import serial
+
+class SerialWorker(threading.Thread):
+    def __init__(self, port, baud, buf1: deque, buf2: deque, 
+                 signals: Signals):
+        super().__init__(daemon=True)
+        self.port    = port
+        self.baud    = baud
+        self.buf1    = buf1
+        self.buf2    = buf2
+        self.signals = signals
+        self._ser    = None
+        self._running = False
+        self._streaming = False
+```
+
+**Source:** `GUIOSCI.py:52-62`
+
+<ParamField path="port" type="string" required>
+  Serial port name (e.g., "/dev/ttyUSB0", "COM3")
+</ParamField>
+
+<ParamField path="baud" type="int" required>
+  Baud rate for serial communication
+</ParamField>
+
+<ParamField path="buf1" type="deque" required>
+  Shared buffer for channel 1 data
+</ParamField>
+
+<ParamField path="buf2" type="deque" required>
+  Shared buffer for channel 2 data
+</ParamField>
+
+<ParamField path="signals" type="Signals" required>
+  Qt signal object for thread-safe communication
+</ParamField>
+
+### Serial Communication Methods
+
+Send commands and control data streaming.
+
+```python
+def send(self, msg: str):
+    """Send command to serial device."""
+    if self._ser and self._ser.is_open:
+        try:
+            self._ser.write((msg + "\n").encode())
+        except:
+            pass
+
+def start_streaming(self):
+    """Start ADC data acquisition."""
+    self._streaming = True
+    self.send("ADC START")
+
+def stop_streaming(self):
+    """Stop ADC data acquisition."""
+    self._streaming = False
+    self.send("ADC STOP")
+
+def stop(self):
+    """Stop thread and close serial port."""
+    self._running = False
+    if self._ser:
+        try:
+            self._ser.close()
+        except:
+            pass
+```
+
+**Source:** `GUIOSCI.py:65-86`
+
+### Serial Data Parsing Loop
+
+Main thread loop for reading and parsing serial data.
+
+```python
+def run(self):
+    """Main serial worker thread loop."""
+    self._running = True
+    
+    try:
+        # Open serial connection
+        self._ser = serial.Serial(self.port, self.baud, timeout=1)
+        time.sleep(1.5)  # Wait for ESP32 reset
+        self.signals.connected.emit()
+        self.signals.status_msg.emit(f"Conectado a {self.port}")
+    except Exception as e:
+        self.signals.disconnected.emit(str(e))
+        return
+    
+    while self._running:
+        try:
+            # Read line from serial
+            line = self._ser.readline().decode(errors="ignore").strip()
+        except Exception as e:
+            self.signals.disconnected.emit(str(e))
+            break
+        
+        # Parse sample format: "S,ch1_value,ch2_value"
+        if line.startswith("S,"):
+            parts = line.split(",")
+            if len(parts) == 3:
+                try:
+                    v1 = int(parts[1])
+                    v2 = int(parts[2])
+                    self.buf1.append(v1)
+                    self.buf2.append(v2)
+                except:
+                    pass
+    
+    self.signals.disconnected.emit("Desconectado")
+```
+
+**Source:** `GUIOSCI.py:89-119`
+
+## Qt Signals
+
+### Custom Signal Class
+
+Thread-safe signal definitions for inter-thread communication.
+
+```python
+from PyQt5.QtCore import QObject, pyqtSignal
+
+class Signals(QObject):
+    connected    = pyqtSignal()          # Connection established
+    disconnected = pyqtSignal(str)       # Disconnected with reason
+    status_msg   = pyqtSignal(str)       # Status message update
+```
+
+**Source:** `GUIOSCI.py:47-50`
+
+## Plot Widgets (pyqtgraph)
+
+### Create Plot Widget
+
+Initialize pyqtgraph plot with styling.
+
+```python
+import pyqtgraph as pg
+
+# Create plot widget
+self.plot1 = pg.PlotWidget(title="Canal 1  (GPIO 34)")
+self._style_plot(self.plot1)
+
+# Create curve item with custom pen
+self.curve1 = self.plot1.plot(pen=pg.mkPen(COLORS["CH1"], width=1.5))
+```
+
+**Source:** `GUIOSCI.py:341-343`
+
+### Style Plot Appearance
+
+Configure plot background, grid, and axes.
+
+```python
+def _style_plot(self, p: pg.PlotWidget):
+    """Apply dark theme styling to plot widget."""
+    p.setBackground(COLORS["bg"])
+    p.showGrid(x=True, y=True, alpha=0.3)
+    p.getAxis("left").setTextPen("#aaaacc")
+    p.getAxis("bottom").setTextPen("#aaaacc")
+    p.setLabel("bottom", "Tiempo", units="ms")
+    p.setLabel("left", "Voltaje", units="V")
+    p.setYRange(0, ADC_VREF)
+```
+
+**Source:** `GUIOSCI.py:365-372`
+
+<ParamField path="p" type="pg.PlotWidget" required>
+  PlotWidget instance to style
+</ParamField>
+
+### Link Plot Axes
+
+Share X-axis between multiple plots for synchronized zooming.
+
+```python
+# Link X-axis of plot2 to plot1
+self.plot2.setXLink(self.plot1)
+```
+
+**Source:** `GUIOSCI.py:353`
+
+## Control Widgets
+
+### Connection Controls
+
+Serial port selection and connection buttons.
+
+```python
+from PyQt5.QtWidgets import QGroupBox, QGridLayout, QLabel, QComboBox
+import serial.tools.list_ports
+
+# Create connection group
+grp_conn = QGroupBox("Conexión Serial")
+g = QGridLayout(grp_conn)
+
+# Port selection combo box
+g.addWidget(QLabel("Puerto:"), 0, 0)
+self.cmb_ports = QComboBox()
+ports = [p.device for p in serial.tools.list_ports.comports()]
+self.cmb_ports.addItems(ports)
+g.addWidget(self.cmb_ports, 0, 1)
+
+# Baud rate input
+g.addWidget(QLabel("Baudrate:"), 1, 0)
+self.inp_baud = QLineEdit("115200")
+g.addWidget(self.inp_baud, 1, 1)
+
+# Connect button
+self.btn_connect = QPushButton("Conectar")
+self.btn_connect.setObjectName("btn_connect")
+self.btn_connect.clicked.connect(self._connect)
+g.addWidget(self.btn_connect, 2, 0, 1, 2)
+
+# Disconnect button
+self.btn_disconnect = QPushButton("Desconectar")
+self.btn_disconnect.setObjectName("btn_disconnect")
+self.btn_disconnect.clicked.connect(self._disconnect)
+self.btn_disconnect.setEnabled(False)
+g.addWidget(self.btn_disconnect, 3, 0, 1, 2)
+```
+
+**Source:** `GUIOSCI.py:228-252`
+
+### Streaming Controls
+
+Start and stop data acquisition.
+
+```python
+from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout
+
+grp_stream = QGroupBox("Streaming ADC")
+g2 = QVBoxLayout(grp_stream)
+row = QHBoxLayout()
+
+# Start button
+self.btn_start = QPushButton("▶  START")
+self.btn_start.setObjectName("btn_start")
+self.btn_start.clicked.connect(self._start_adc)
+self.btn_start.setEnabled(False)
+
+# Stop button
+self.btn_stop = QPushButton("■  STOP")
+self.btn_stop.setObjectName("btn_stop")
+self.btn_stop.clicked.connect(self._stop_adc)
+self.btn_stop.setEnabled(False)
+
+row.addWidget(self.btn_start)
+row.addWidget(self.btn_stop)
+g2.addLayout(row)
+```
+
+**Source:** `GUIOSCI.py:257-270`
+
+### Channel Visibility Checkboxes
+
+Toggle channel display.
+
+```python
+from PyQt5.QtWidgets import QCheckBox
+
+grp_ch = QGroupBox("Canales")
+g3 = QVBoxLayout(grp_ch)
+
+# Channel 1 checkbox
+self.chk_ch1 = QCheckBox("CH1  (GPIO 34)")
+self.chk_ch1.setChecked(True)
+self.chk_ch1.setStyleSheet(f"color: {COLORS['CH1']}")
+
+# Channel 2 checkbox
+self.chk_ch2 = QCheckBox("CH2  (GPIO 35)")
+self.chk_ch2.setChecked(True)
+self.chk_ch2.setStyleSheet(f"color: {COLORS['CH2']}")
+
+g3.addWidget(self.chk_ch1)
+g3.addWidget(self.chk_ch2)
+```
+
+**Source:** `GUIOSCI.py:274-284`
+
+### Time Window Slider
+
+Adjust visible time window.
+
+```python
+from PyQt5.QtWidgets import QSlider, QLabel
+from PyQt5.QtCore import Qt
+
+grp_time = QGroupBox("Ventana de tiempo")
+g4 = QVBoxLayout(grp_time)
+
+# Horizontal slider
+self.sld_time = QSlider(Qt.Horizontal)
+self.sld_time.setMinimum(50)
+self.sld_time.setMaximum(BUFFER_LEN)
+self.sld_time.setValue(BUFFER_LEN)
+self.sld_time.valueChanged.connect(self._on_time_changed)
+
+# Label showing current value
+self.lbl_time = QLabel(f"{BUFFER_LEN / SAMPLE_RATE * 1000:.0f} ms")
+self.lbl_time.setAlignment(Qt.AlignCenter)
+
+g4.addWidget(self.sld_time)
+g4.addWidget(self.lbl_time)
+```
+
+**Source:** `GUIOSCI.py:287-298`
+
+### Y-Axis Scale Selector
+
+Switch between voltage, raw ADC, and auto-scale modes.
+
+```python
+grp_volt = QGroupBox("Escala Y")
+g5 = QVBoxLayout(grp_volt)
+
+self.cmb_ymode = QComboBox()
+self.cmb_ymode.addItems([
+    "Voltios (0–3.3 V)", 
+    "Raw ADC (0–4095)", 
+    "Auto"
+])
+self.cmb_ymode.currentIndexChanged.connect(self._on_ymode_changed)
+g5.addWidget(self.cmb_ymode)
+```
+
+**Source:** `GUIOSCI.py:301-307`
+
+### Measurement Display Labels
+
+Show real-time voltage and frequency measurements.
+
+```python
+grp_meas = QGroupBox("Mediciones")
+gm = QGridLayout(grp_meas)
+
+# Channel 1 voltage
+gm.addWidget(QLabel("CH1:"), 0, 0)
+self.lbl_v1 = QLabel("—")
+self.lbl_v1.setObjectName("lbl_value1")
+gm.addWidget(self.lbl_v1, 0, 1)
+
+# Channel 2 voltage
+gm.addWidget(QLabel("CH2:"), 1, 0)
+self.lbl_v2 = QLabel("—")
+self.lbl_v2.setObjectName("lbl_value2")
+gm.addWidget(self.lbl_v2, 1, 1)
+
+# Estimated frequency
+gm.addWidget(QLabel("Frec est.:"), 2, 0)
+self.lbl_freq = QLabel("—")
+gm.addWidget(self.lbl_freq, 2, 1)
+```
+
+**Source:** `GUIOSCI.py:310-323`
+
+## Real-Time Data Plotting
+
+### Update Plot Timer
+
+Periodic plot refresh using QTimer.
+
+```python
+from PyQt5.QtCore import QTimer
+
+# Create timer for plot updates
+self.plot_timer = QTimer()
+self.plot_timer.timeout.connect(self._update_plot)
+self.plot_timer.start(PLOT_INTERVAL)  # 50 ms → 20 fps
+```
+
+**Source:** `GUIOSCI.py:147-149`
+
+### Plot Update Method
+
+Transfer buffer data to display arrays and update curves.
+
+```python
+def _update_plot(self):
+    """Called by timer to refresh plots."""
+    n = self._n_samples
+    
+    # Consume data from thread-safe buffers
+    new1 = list(self.buf1)
+    new2 = list(self.buf2)
+    self.buf1.clear()
+    self.buf2.clear()
+    
+    # Roll arrays and append new data
+    if new1:
+        self.data1 = np.roll(self.data1, -len(new1))
+        self.data1[-len(new1):] = new1
+    if new2:
+        self.data2 = np.roll(self.data2, -len(new2))
+        self.data2[-len(new2):] = new2
+    
+    # Extract visible window
+    d1 = self.data1[-n:]
+    d2 = self.data2[-n:]
+    
+    # Generate time axis in milliseconds
+    t_ms = np.linspace(-(n / SAMPLE_RATE * 1000), 0, n)
+    
+    # Convert to voltage if needed
+    if self._ymode == 0:    # Voltage mode
+        y1 = d1 / ADC_MAX * ADC_VREF
+        y2 = d2 / ADC_MAX * ADC_VREF
+    else:                   # Raw or auto mode
+        y1, y2 = d1, d2
+    
+    # Update curves based on visibility
+    if self.chk_ch1.isChecked():
+        self.curve1.setData(t_ms, y1)
+        self.plot1.setVisible(True)
+    else:
+        self.plot1.setVisible(False)
+    
+    if self.chk_ch2.isChecked():
+        self.curve2.setData(t_ms, y2)
+        self.plot2.setVisible(True)
+    else:
+        self.plot2.setVisible(False)
+    
+    # Update measurements
+    if len(d1) > 0 and d1.any():
+        v1_now = d1[-1] / ADC_MAX * ADC_VREF
+        self.lbl_v1.setText(f"{v1_now:.3f} V")
+    if len(d2) > 0 and d2.any():
+        v2_now = d2[-1] / ADC_MAX * ADC_VREF
+        self.lbl_v2.setText(f"{v2_now:.3f} V")
+    
+    # Estimate frequency
+    self._estimate_freq(d1)
+```
+
+**Source:** `GUIOSCI.py:460-512`
+
+## Event Handlers (Slots)
+
+### Connection Handler
+
+Initiate serial connection with selected parameters.
+
+```python
+def _connect(self):
+    """Handle connect button click."""
+    port = self.cmb_ports.currentText()
+    try:
+        baud = int(self.inp_baud.text().strip())
+    except ValueError:
+        self._set_status("Baudrate inválido")
+        return
+    
+    self._start_worker(port, baud)
+
+def _start_worker(self, port, baud):
+    """Create and start serial worker thread."""
+    if self.worker and self.worker.is_alive():
+        self.worker.stop()
+        time.sleep(0.3)
+    
+    self.buf1.clear()
+    self.buf2.clear()
+    
+    self.worker = SerialWorker(port, baud, self.buf1, 
+                                self.buf2, self.signals)
+    self.worker.start()
+    
+    self._set_status(f"Conectando a {port}…")
+```
+
+**Source:** `GUIOSCI.py:375-396`
+
+### Streaming Control Handlers
+
+Start and stop ADC data acquisition.
+
+```python
+def _start_adc(self):
+    """Start ADC streaming."""
+    if self.worker:
+        self.worker.start_streaming()
+        self.btn_start.setEnabled(False)
+        self.btn_stop.setEnabled(True)
+        self._set_status("Streaming activo")
+
+def _stop_adc(self):
+    """Stop ADC streaming."""
+    if self.worker:
+        self.worker.stop_streaming()
+        self.btn_start.setEnabled(True)
+        self.btn_stop.setEnabled(False)
+        self._set_status("Streaming detenido")
+```
+
+**Source:** `GUIOSCI.py:402-414`
+
+### Time Scale Handler
+
+Update visible time window based on slider value.
+
+```python
+def _on_time_changed(self, val):
+    """Handle time window slider change."""
+    self._n_samples = val
+    ms = val / SAMPLE_RATE * 1000
+    self.lbl_time.setText(f"{ms:.0f} ms")
+```
+
+**Source:** `GUIOSCI.py:422-425`
+
+### Y-Scale Mode Handler
+
+Switch between voltage, raw, and auto-scale modes.
+
+```python
+def _on_ymode_changed(self, idx):
+    """Handle Y-axis scale mode change."""
+    self._ymode = idx
+    
+    if idx == 0:   # Voltage mode
+        self.plot1.setYRange(0, ADC_VREF)
+        self.plot2.setYRange(0, ADC_VREF)
+        self.plot1.setLabel("left", "Voltaje", units="V")
+        self.plot2.setLabel("left", "Voltaje", units="V")
+    
+    elif idx == 1:  # Raw ADC mode
+        self.plot1.setYRange(0, ADC_MAX)
+        self.plot2.setYRange(0, ADC_MAX)
+        self.plot1.setLabel("left", "ADC raw")
+        self.plot2.setLabel("left", "ADC raw")
+    
+    else:           # Auto-scale mode
+        self.plot1.enableAutoRange(axis="y")
+        self.plot2.enableAutoRange(axis="y")
+```
+
+**Source:** `GUIOSCI.py:427-442`
+
+### Connection State Handlers
+
+Update UI when connection state changes.
+
+```python
+def _on_connected(self):
+    """Handle successful connection."""
+    self.btn_connect.setEnabled(False)
+    self.btn_disconnect.setEnabled(True)
+    self.btn_start.setEnabled(True)
+    self.btn_stop.setEnabled(False)
+
+def _on_disconnected(self, reason):
+    """Handle disconnection event."""
+    self.btn_connect.setEnabled(True)
+    self.btn_disconnect.setEnabled(False)
+    self.btn_start.setEnabled(False)
+    self.btn_stop.setEnabled(False)
+    self._set_status(f"Desconectado: {reason}")
+```
+
+**Source:** `GUIOSCI.py:443-454`
+
+## Styling (Qt StyleSheets)
+
+### Apply Dark Theme
+
+Custom dark theme for entire application.
+
+```python
+def _apply_dark_theme(self):
+    """Configure pyqtgraph and Qt stylesheet."""
+    # PyQtGraph settings
+    pg.setConfigOption("background", COLORS["bg"])
+    pg.setConfigOption("foreground", "#cccccc")
+    
+    # Qt stylesheet
+    self.setStyleSheet(f"""
+        QMainWindow, QWidget {{
+            background-color: {COLORS["bg"]};
+            color: #e0e0e0;
+            font-family: 'Segoe UI', sans-serif;
+            font-size: 11px;
+        }}
+        QGroupBox {{
+            border: 1px solid #333355;
+            border-radius: 6px;
+            margin-top: 10px;
+            padding: 6px;
+        }}
+        QPushButton {{
+            background-color: #252540;
+            border: 1px solid #444466;
+            border-radius: 5px;
+            padding: 5px 14px;
+            color: #e0e0e0;
+        }}
+        QPushButton:hover  {{ background-color: #333360; }}
+        QPushButton:pressed{{ background-color: #1a1a35; }}
+        QSlider::groove:horizontal {{
+            height: 4px;
+            background: #333355;
+            border-radius: 2px;
+        }}
+        QSlider::handle:horizontal {{
+            width: 14px; height: 14px;
+            background: #5555aa;
+            border-radius: 7px;
+            margin: -5px 0;
+        }}
+    """)
+```
+
+**Source:** `GUIOSCI.py:152-210`
+
+## Application Entry Point
+
+### Main Function
+
+Standard PyQt5 application initialization.
+
+```python
+import sys
+from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QFont
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    app.setFont(QFont("Segoe UI", 10))
+    
+    win = OsciloscopioWindow()
+    win.show()
+    
+    sys.exit(app.exec_())
+```
+
+**Source:** `GUIOSCI.py:539-544`
+
+## Clean Shutdown
+
+### Close Event Handler
+
+Ensure proper resource cleanup on window close.
+
+```python
+def closeEvent(self, event):
+    """Handle window close event."""
+    if self.worker:
+        self.worker.stop()
+    event.accept()
+```
+
+**Source:** `GUIOSCI.py:530-533`
+
+## Status Bar
+
+### Status Message Updates
+
+Display connection and streaming status.
+
+```python
+from PyQt5.QtWidgets import QStatusBar
+
+# Create status bar
+self.status_bar = QStatusBar()
+self.setStatusBar(self.status_bar)
+self.status_bar.showMessage("Sin conexión")
+
+# Update status method
+def _set_status(self, msg):
+    """Update status bar message."""
+    self.status_bar.showMessage(msg)
+```
+
+**Source:** `GUIOSCI.py:358-360`, `GUIOSCI.py:456-457`
+
+## Best Practices
+
+### Thread Safety
+
+Always use Qt signals for cross-thread communication:
+
+```python
+# ✓ Good: Use signals
+self.signals.status_msg.emit("Message from thread")
+
+# ✗ Bad: Direct GUI update from thread
+# self.label.setText("...")  # Will crash!
+```
+
+### Buffer Management
+
+Use deque with maxlen for automatic circular buffer:
+
+```python
+from collections import deque
+
+# Circular buffer - old data automatically discarded
+self.buf1 = deque(maxlen=BUFFER_LEN * 4)
+```
+
+**Source:** `GUIOSCI.py:131`
+
+### Error Handling
+
+Wrap serial operations in try-except blocks:
+
+```python
+try:
+    self._ser.write((msg + "\n").encode())
+except:
+    pass  # Silent fail for robustness
+```
+
+**Source:** `GUIOSCI.py:68-70`

@@ -1,0 +1,586 @@
+---
+title: 'Kinematics Experiment'
+description: 'Measure position, velocity, and acceleration using camera tracking or time-of-flight sensors'
+---
+
+## Overview
+
+The kinematics experiment provides a comprehensive study of 1D motion. You can measure position vs. time and calculate velocity and acceleration using either camera-based tracking or distance sensors (ultrasonic or ToF laser).
+
+## Physics Theory
+
+### Fundamental Kinematic Quantities
+
+**Position**: $x(t)$ - Location as a function of time
+
+**Velocity**: $v(t) = \frac{dx}{dt}$ - Rate of change of position
+
+**Acceleration**: $a(t) = \frac{dv}{dt} = \frac{d^2x}{dt^2}$ - Rate of change of velocity
+
+### Types of Motion
+
+**Uniform Motion** (constant velocity):
+$$x(t) = x_0 + vt$$
+$$a = 0$$
+
+**Uniformly Accelerated Motion**:
+$$x(t) = x_0 + v_0 t + \frac{1}{2}at^2$$
+$$v(t) = v_0 + at$$
+
+**General Motion**:
+- Position data collected experimentally
+- Velocity from numerical differentiation: $v_i = \frac{x_{i+1} - x_{i-1}}{2\Delta t}$
+- Acceleration from second derivative: $a_i = \frac{v_{i+1} - v_{i-1}}{2\Delta t}$
+
+## Measurement Methods
+
+<Tabs>
+  <Tab title="Camera Tracking">
+    ### Video-Based Position Tracking
+    
+    Track a colored object moving in 1D (horizontal or vertical) using OpenCV.
+    
+    **Source**: `~/workspace/source/Kinemactic/kinematicCam/analisis.py`
+    
+    #### Hardware Requirements
+    - Camera (webcam, USB camera, phone)
+    - Colored marker on moving object
+    - Ruler or calibration markers (known distance)
+    - Track or path for object motion
+    
+    #### Setup Procedure
+    
+    <Steps>
+      <Step title="Setup Physical Track">
+        - Create horizontal or vertical track
+        - Attach colored marker to moving object
+        - Place calibration markers at known distances
+        - Ensure motion is approximately 1D
+      </Step>
+      
+      <Step title="Record Video">
+        - Position camera perpendicular to motion
+        - Ensure full range of motion visible
+        - Record at consistent frame rate
+        - Adequate lighting
+      </Step>
+      
+      <Step title="Run Analysis">
+        ```bash
+        cd ~/workspace/source/Kinemactic/kinematicCam
+        python analisis.py
+        ```
+      </Step>
+      
+      <Step title="Configure Analysis">
+        **Frame Selection**:
+        - Navigate: `d` (next), `a` (previous)
+        - Mark start: `i`
+        - Mark end: `f`
+        
+        **Color Calibration**:
+        - Select ROI around moving object
+        - Automatic HSV range detection
+        
+        **Spatial Calibration**:
+        - Click on two points with known separation
+        - Enter distance in meters
+        - System calculates pixel-to-meter scale
+      </Step>
+    </Steps>
+    
+    #### Key Code Sections
+    
+    **Color Detection** (`analisis.py:85-99`):
+    ```python
+    # Select ROI for color calibration
+    roi = cv2.selectROI("Seleccionar objeto", frame, False)
+    x, y, w, h = roi
+    objeto = frame[y:y+h, x:x+w]
+    hsv_objeto = cv2.cvtColor(objeto, cv2.COLOR_BGR2HSV)
+    
+    h_mean = np.mean(hsv_objeto[:,:,0])
+    hsv_lower = np.array([h_mean-15, 50, 50])
+    hsv_upper = np.array([h_mean+15, 255, 255])
+    ```
+    
+    **Pixel-to-Meter Calibration** (`analisis.py:107-135`):
+    ```python
+    # User clicks two points with known distance
+    puntos = []
+    
+    def click(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            puntos.append((x,y))
+    
+    cv2.setMouseCallback("Calibracion", click)
+    
+    # Wait for 2 clicks
+    while len(puntos) < 2:
+        cv2.waitKey(1)
+    
+    dist_px = np.linalg.norm(np.array(puntos[0]) - np.array(puntos[1]))
+    escala = distancia_real_m / dist_px  # m/pixel
+    ```
+    
+    **Object Tracking** (`analisis.py:145-180`):
+    ```python
+    while frame_num <= frame_fin:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5,5),np.uint8))
+        
+        contornos, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, 
+                                         cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contornos:
+            c = max(contornos, key=cv2.contourArea)
+            M = cv2.moments(c)
+            
+            if M["m00"] != 0:
+                cx = int(M["m10"]/M["m00"])
+                cy = int(M["m01"]/M["m00"])
+                
+                x_m = cx * escala
+                y_m = cy * escala
+                tiempo = (frame_num - frame_inicio) / fps
+                
+                datos.append((tiempo, x_m, y_m))
+    ```
+    
+    #### Output
+    - `posicion_vs_tiempo.txt`: Time and position data
+    - Automatic plot of position vs. time
+    - Polynomial fit for acceleration estimation
+  </Tab>
+  
+  <Tab title="Distance Sensors">
+    ### Time-of-Flight (ToF) Laser Sensor
+    
+    Use VL53L0X or VL53L1X sensor with ESP32/Arduino for precise distance measurements.
+    
+    **Source**: `~/workspace/source/Kinemactic/VL53_filtros/VL53_filtros.ino`
+    
+    #### Hardware Requirements
+    - ESP32 or Arduino
+    - VL53L0X ToF laser sensor
+    - I2C wiring (SDA, SCL)
+    - USB cable for data collection
+    - Moving object (cart, hand, pendulum bob)
+    
+    #### Wiring
+    
+    | VL53L0X Pin | ESP32 Pin | Arduino Pin |
+    |-------------|-----------|-------------|
+    | VCC | 3.3V | 5V |
+    | GND | GND | GND |
+    | SDA | GPIO 21 | A4 |
+    | SCL | GPIO 22 | A5 |
+    | INT (optional) | GPIO 27 | D2 |
+    
+    #### How It Works
+    
+    The firmware implements **three digital filters** for noise reduction:
+    
+    1. **EMA (Exponential Moving Average)**: Fast response, simple
+    2. **Butterworth 2nd Order**: Smooth, no phase distortion
+    3. **α-β Filter (g-h filter)**: Position and velocity estimation
+    
+    #### Firmware Walkthrough
+    
+    **Timer Configuration** (`VL53_filtros.ino:113-116`):
+    ```cpp
+    timer = timerBegin(0, 80, true);           // 1 µs tick
+    timerAttachInterrupt(timer, &onTimer, true);
+    timerAlarmWrite(timer, 200 * 1000, true);  // 200 ms = 5 Hz
+    timerAlarmEnable(timer);
+    ```
+    
+    **EMA Filter** (`VL53_filtros.ino:145-151`):
+    ```cpp
+    const float alphaEMA = 0.2;
+    float ema = 0.0;
+    
+    if (!emaInit) {
+        ema = raw;
+        emaInit = true;
+    } else {
+        ema = alphaEMA * raw + (1.0 - alphaEMA) * ema;
+    }
+    ```
+    
+    **Butterworth Filter** (`VL53_filtros.ino:78-94`):
+    ```cpp
+    // 2nd order Butterworth (fs=5Hz, fc≈0.8Hz)
+    const float b0 = 0.2066;
+    const float b1 = 0.4131;
+    const float b2 = 0.2066;
+    const float a1 = -0.3695;
+    const float a2 = 0.1958;
+    
+    float butterworth(float x) {
+        if (!bwInit) {
+            bw_x1 = bw_x2 = x;
+            bw_y1 = bw_y2 = x;
+            bwInit = true;
+            return x;
+        }
+        
+        float y = b0*x + b1*bw_x1 + b2*bw_x2 - a1*bw_y1 - a2*bw_y2;
+        
+        bw_x2 = bw_x1; bw_x1 = x;
+        bw_y2 = bw_y1; bw_y1 = y;
+        
+        return y;
+    }
+    ```
+    
+    **α-β Filter** (`VL53_filtros.ino:159-170`):
+    ```cpp
+    // α-β filter (also called g-h filter)
+    float alphaAB = 0.85;
+    float betaAB  = 0.02;
+    float posAB = 0.0;
+    float velAB = 0.0;
+    
+    if (!abInit) {
+        posAB = raw;
+        velAB = 0.0;
+        abInit = true;
+    } else {
+        float pred = posAB + velAB * dt;
+        float err  = raw - pred;
+        posAB = pred + alphaAB * err;
+        velAB = velAB + (betaAB * err) / dt;
+    }
+    ```
+    
+    #### Data Collection
+    
+    **Serial Output Format** (`VL53_filtros.ino:118`):
+    ```cpp
+    Serial.println("t,raw_cm,ema_cm,bw_cm,ab_cm,ab_vel_cm_s");
+    ```
+    
+    **Python Data Capture**:
+    ```python
+    import serial
+    import pandas as pd
+    
+    ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+    
+    data = []
+    try:
+        while True:
+            line = ser.readline().decode('utf-8').strip()
+            if line and not line.startswith('t,'):
+                values = line.split(',')
+                data.append([float(v) for v in values])
+    except KeyboardInterrupt:
+        pass
+    
+    df = pd.DataFrame(data, columns=['t', 'raw', 'ema', 'bw', 'ab_pos', 'ab_vel'])
+    df.to_csv('distance_data.csv', index=False)
+    ```
+    
+    #### Filter Comparison
+    
+    | Filter | Response Time | Noise Reduction | Velocity Output |
+    |--------|---------------|-----------------|----------------|
+    | **Raw** | Instant | None | No |
+    | **EMA** | Fast | Moderate | No |
+    | **Butterworth** | Slow | Excellent | No |
+    | **α-β** | Fast | Good | **Yes** |
+    
+    For position-only: Use Butterworth
+    For position + velocity: Use α-β filter
+  </Tab>
+  
+  <Tab title="Ultrasonic Sensor">
+    ### HC-SR04 Ultrasonic Distance Sensor
+    
+    Alternative to ToF sensor using ultrasonic ranging.
+    
+    **Source**: `~/workspace/source/Kinemactic/ultraSonido_filtros/ultraSonido_filtros.ino`
+    
+    #### Hardware Requirements
+    - Arduino or ESP32
+    - HC-SR04 ultrasonic sensor
+    - 4 jumper wires
+    - USB cable
+    
+    #### Wiring
+    
+    | HC-SR04 Pin | Arduino Pin |
+    |-------------|-------------|
+    | VCC | 5V |
+    | GND | GND |
+    | TRIG | D9 |
+    | ECHO | D10 |
+    
+    #### Limitations
+    
+    - **Range**: 2cm - 400cm
+    - **Resolution**: ~0.3cm
+    - **Update rate**: ~10-20 Hz (slower than ToF)
+    - **Beam angle**: ~15° (requires alignment)
+    - **Environmental**: Affected by temperature, humidity
+    
+    #### When to Use
+    
+    - Longer range needed (> 120cm)
+    - Lower cost requirement
+    - Slower motion acceptable
+    - Large, flat targets
+  </Tab>
+</Tabs>
+
+## Data Analysis
+
+### Velocity from Position Data
+
+Numerical differentiation with smoothing:
+
+```python
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Load data
+data = np.loadtxt('posicion_vs_tiempo.txt')
+t = data[:, 0]
+x = data[:, 1]  # or calculate distance: np.linalg.norm(data[:,1:3], axis=1)
+
+# Smoothing function
+def smooth(arr, window=5):
+    kernel = np.ones(window) / window
+    return np.convolve(arr, kernel, mode='same')
+
+# Smooth position
+x_smooth = smooth(x, window=5)
+
+# Calculate velocity (central difference)
+v = np.gradient(x_smooth, t)
+v_smooth = smooth(v, window=5)
+
+# Calculate acceleration
+a = np.gradient(v_smooth, t)
+a_smooth = smooth(a, window=5)
+```
+
+### Plotting Results
+
+```python
+fig, axs = plt.subplots(3, 1, figsize=(10, 10), sharex=True)
+
+# Position
+axs[0].plot(t, x, 'o', alpha=0.3, label='Raw')
+axs[0].plot(t, x_smooth, '-', lw=2, label='Smoothed')
+axs[0].set_ylabel('Position (m)')
+axs[0].legend()
+axs[0].grid()
+
+# Velocity
+axs[1].plot(t, v_smooth, '-', lw=2, color='orange')
+axs[1].axhline(0, color='gray', linestyle='--')
+axs[1].set_ylabel('Velocity (m/s)')
+axs[1].grid()
+
+# Acceleration
+axs[2].plot(t, a_smooth, '-', lw=2, color='red')
+axs[2].axhline(0, color='gray', linestyle='--')
+axs[2].set_ylabel('Acceleration (m/s²)')
+axs[2].set_xlabel('Time (s)')
+axs[2].grid()
+
+plt.tight_layout()
+plt.savefig('kinematics_analysis.png', dpi=150)
+plt.show()
+```
+
+### Motion Classification
+
+Automatically determine motion type:
+
+```python
+# Calculate mean absolute values
+mean_v = np.mean(np.abs(v_smooth))
+mean_a = np.mean(np.abs(a_smooth))
+
+# Thresholds (adjust based on noise)
+v_threshold = 0.01  # m/s
+a_threshold = 0.1   # m/s²
+
+if mean_v < v_threshold:
+    motion_type = "Stationary"
+elif mean_a < a_threshold:
+    motion_type = "Uniform (constant velocity)"
+else:
+    motion_type = "Accelerated"
+
+print(f"Motion type: {motion_type}")
+print(f"Mean velocity: {mean_v:.4f} m/s")
+print(f"Mean acceleration: {mean_a:.4f} m/s²")
+```
+
+### Curve Fitting
+
+**Linear (uniform motion)**:
+```python
+from scipy.optimize import curve_fit
+
+def linear(t, x0, v):
+    return x0 + v * t
+
+popt, pcov = curve_fit(linear, t, x_smooth)
+x0_fit, v_fit = popt
+perr = np.sqrt(np.diag(pcov))
+
+print(f"Initial position: {x0_fit:.4f} ± {perr[0]:.4f} m")
+print(f"Velocity: {v_fit:.4f} ± {perr[1]:.4f} m/s")
+```
+
+**Quadratic (constant acceleration)**:
+```python
+def quadratic(t, x0, v0, a):
+    return x0 + v0 * t + 0.5 * a * t**2
+
+popt, pcov = curve_fit(quadratic, t, x_smooth)
+x0_fit, v0_fit, a_fit = popt
+perr = np.sqrt(np.diag(pcov))
+
+print(f"Initial position: {x0_fit:.4f} ± {perr[0]:.4f} m")
+print(f"Initial velocity: {v0_fit:.4f} ± {perr[1]:.4f} m/s")
+print(f"Acceleration: {a_fit:.4f} ± {perr[2]:.4f} m/s²")
+```
+
+## Experimental Scenarios
+
+### 1. Constant Velocity Cart
+
+**Setup**: Cart on air track or low-friction surface, gentle push
+
+**Expected**:
+- Linear x(t)
+- Constant v
+- a ≈ 0
+
+### 2. Accelerated Cart
+
+**Setup**: Cart on inclined plane or with hanging mass
+
+**Expected**:
+- Quadratic x(t)
+- Linear v(t)
+- Constant a
+
+### 3. Oscillating Mass
+
+**Setup**: Mass on spring or pendulum (viewed from side)
+
+**Expected**:
+- Sinusoidal x(t)
+- Cosine v(t) (90° phase shift)
+- Negative sine a(t)
+
+### 4. Free Fall (Vertical)
+
+**Setup**: Object dropped, camera viewing from side
+
+**Expected**:
+- Quadratic x(t)
+- Linear v(t) with slope g
+- a ≈ -9.8 m/s²
+
+## Tips for Best Results
+
+<AccordionGroup>
+  <Accordion title="Camera Method">
+    - Mount camera very stably (tripod essential)
+    - Use high-contrast colored marker
+    - Ensure marker always visible (no occlusion)
+    - Adequate frame rate (30+ FPS)
+    - Minimize parallax (camera perpendicular)
+    - Measure calibration distance accurately
+  </Accordion>
+  
+  <Accordion title="ToF Sensor">
+    - Mount sensor rigidly
+    - Align perpendicular to motion
+    - Use flat, non-reflective target
+    - Shield from ambient IR light
+    - Choose appropriate filter for your motion
+    - Calibrate zero position
+  </Accordion>
+  
+  <Accordion title="Data Processing">
+    - Apply appropriate smoothing (balance noise vs. response)
+    - Use central difference for derivatives (more accurate)
+    - Check for systematic errors (offset, scaling)
+    - Estimate uncertainties from repeated trials
+    - Plot raw and processed data together
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+| Issue | Camera Method | Sensor Method |
+|-------|---------------|---------------|
+| Noisy position | Better lighting, less blur | Increase filter strength |
+| Erratic velocity | More smoothing, higher FPS | Lower cutoff frequency |
+| Lost tracking | Brighter marker, adjust HSV | Check alignment, target |
+| Scale errors | Re-measure calibration distance | Verify sensor calibration |
+| Time sync issues | Verify FPS, check frame drops | Check timer configuration |
+
+## Advanced Analysis
+
+### Uncertainty Quantification
+
+```python
+# Repeat experiment N times
+N_trials = 5
+all_data = []  # Load N datasets
+
+# Calculate mean and std at each time point
+t_common = ...  # Common time base
+x_mean = np.mean(all_data, axis=0)
+x_std = np.std(all_data, axis=0)
+
+# Plot with error bars
+plt.errorbar(t_common, x_mean, yerr=x_std, fmt='o-', capsize=3)
+plt.fill_between(t_common, x_mean-x_std, x_mean+x_std, alpha=0.3)
+```
+
+### Frequency Analysis
+
+For periodic motion:
+
+```python
+from scipy.fft import fft, fftfreq
+
+# FFT of position signal
+X = fft(x_smooth - np.mean(x_smooth))
+freqs = fftfreq(len(t), t[1] - t[0])
+
+# Plot power spectrum
+plt.figure()
+plt.plot(freqs[:len(freqs)//2], np.abs(X[:len(X)//2]))
+plt.xlabel('Frequency (Hz)')
+plt.ylabel('Magnitude')
+plt.title('Frequency Spectrum')
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Experiments Overview" icon="flask" href="/experiments/overview">
+    Explore other physics experiments
+  </Card>
+  
+  <Card title="Data Analysis Guide" icon="chart-line" href="/guides/data-analysis">
+    Advanced filtering and analysis techniques
+  </Card>
+</CardGroup>

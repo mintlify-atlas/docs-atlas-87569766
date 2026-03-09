@@ -1,0 +1,504 @@
+---
+title: 'Dual-Channel Oscilloscope'
+description: 'ESP32-based oscilloscope with PyQt5 GUI for real-time signal visualization'
+---
+
+## Overview
+
+The PhysisLab oscilloscope is a dual-channel data acquisition system built around the ESP32's 12-bit ADC. It streams samples at 10 kHz per channel and provides real-time visualization through a PyQt5-based GUI with features comparable to entry-level commercial oscilloscopes.
+
+<Frame>
+  <img src="/images/oscilloscope-gui.png" alt="Oscilloscope GUI" />
+</Frame>
+
+## Hardware Configuration
+
+### ADC Specifications
+
+<CardGroup cols={2}>
+  <Card title="Resolution" icon="ruler">
+    12-bit (0-4095)
+  </Card>
+  
+  <Card title="Voltage Range" icon="bolt">
+    0 - 3.3V
+  </Card>
+  
+  <Card title="Sample Rate" icon="clock">
+    10 kHz per channel
+  </Card>
+  
+  <Card title="Channels" icon="layer-group">
+    2 independent inputs
+  </Card>
+</CardGroup>
+
+### Pin Configuration
+
+| Channel | GPIO Pin | ADC Unit | Notes |
+|---------|----------|----------|-------|
+| CH1 | GPIO 34 | ADC1_6 | Analog input only |
+| CH2 | GPIO 35 | ADC1_7 | Analog input only |
+
+<Warning>
+GPIO 34 and 35 are input-only pins. Do not exceed 3.3V or apply negative voltages to prevent damage to the ESP32.
+</Warning>
+
+## ESP32 Firmware
+
+The oscilloscope functionality is integrated into the combined firmware `GENERADOR_OSCILOSCOPIO.ino`:
+
+### ADC Streaming Implementation
+
+```cpp GENERADOR_OSCILOSCOPIO.ino
+// ADC Configuration
+#define ADC1_PIN 34
+#define ADC2_PIN 35
+#define ADC_READ_INTERVAL_US (1000000 / 10000)  // 10 kHz sampling
+
+volatile bool adcStreaming = false;
+unsigned long lastAdcMicros = 0;
+
+void loop() {
+  // Handle serial commands
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd == "ADC START") {
+      adcStreaming = true;
+      Serial.println("ADC STREAMING STARTED");
+    } 
+    else if (cmd == "ADC STOP") {
+      adcStreaming = false;
+      Serial.println("ADC STREAMING STOPPED");
+    }
+  }
+  
+  // Stream ADC samples at 10 kHz
+  if (adcStreaming) {
+    unsigned long now = micros();
+    if (now - lastAdcMicros >= ADC_READ_INTERVAL_US) {
+      lastAdcMicros = now;
+      
+      int adc1 = analogRead(ADC1_PIN);
+      int adc2 = analogRead(ADC2_PIN);
+      
+      // Format: S,<ch1>,<ch2>
+      Serial.print("S,");
+      Serial.print(adc1);
+      Serial.print(",");
+      Serial.println(adc2);
+    }
+  }
+}
+```
+
+### Data Format
+
+Samples are transmitted as CSV lines with a prefix:
+
+```
+S,2048,1536
+S,2050,1540
+S,2045,1532
+```
+
+- **Format**: `S,<ch1_raw>,<ch2_raw>`
+- **Values**: 0-4095 (12-bit ADC)
+- **Rate**: ~10,000 lines per second when streaming
+
+## Python GUI Application
+
+The oscilloscope GUI is implemented in `GUIOSCI.py` using PyQt5 and pyqtgraph.
+
+### Core Architecture
+
+```python
+import sys
+import threading
+import numpy as np
+from collections import deque
+import serial
+from PyQt5.QtWidgets import QApplication, QMainWindow
+import pyqtgraph as pg
+
+# Configuration constants
+ADC_MAX = 4095
+ADC_VREF = 3.3
+SAMPLE_RATE = 10_000  # Hz
+BUFFER_LEN = 2_000    # samples (200 ms window)
+PLOT_INTERVAL = 50    # ms refresh rate (~20 fps)
+```
+
+### Serial Communication Thread
+
+The GUI uses a dedicated thread for serial communication to prevent blocking the UI:
+
+```python GUIOSCI.py
+class SerialWorker(threading.Thread):
+    def __init__(self, port, baud, buf1: deque, buf2: deque, signals: Signals):
+        super().__init__(daemon=True)
+        self.port = port
+        self.baud = baud
+        self.buf1 = buf1  # Shared buffer for CH1
+        self.buf2 = buf2  # Shared buffer for CH2
+        self.signals = signals
+        self._ser = None
+        self._running = False
+        self._streaming = False
+    
+    def run(self):
+        self._running = True
+        
+        try:
+            self._ser = serial.Serial(self.port, self.baud, timeout=1)
+            time.sleep(1.5)  # Wait for ESP32 reset
+            self.signals.connected.emit()
+        except Exception as e:
+            self.signals.disconnected.emit(str(e))
+            return
+        
+        while self._running:
+            try:
+                line = self._ser.readline().decode(errors="ignore").strip()
+            except Exception as e:
+                self.signals.disconnected.emit(str(e))
+                break
+            
+            # Parse sample data: "S,<ch1>,<ch2>"
+            if line.startswith("S,"):
+                parts = line.split(",")
+                if len(parts) == 3:
+                    try:
+                        v1 = int(parts[1])
+                        v2 = int(parts[2])
+                        self.buf1.append(v1)
+                        self.buf2.append(v2)
+                    except:
+                        pass
+```
+
+### Real-Time Plotting
+
+The GUI updates plots at ~20 fps using a QTimer:
+
+```python GUIOSCI.py
+def _update_plot(self):
+    n = self._n_samples  # Configurable window size
+    
+    # Transfer data from thread-safe deques to numpy arrays
+    new1 = list(self.buf1)
+    new2 = list(self.buf2)
+    self.buf1.clear()
+    self.buf2.clear()
+    
+    if new1:
+        self.data1 = np.roll(self.data1, -len(new1))
+        self.data1[-len(new1):] = new1
+    if new2:
+        self.data2 = np.roll(self.data2, -len(new2))
+        self.data2[-len(new2):] = new2
+    
+    # Extract visible window
+    d1 = self.data1[-n:]
+    d2 = self.data2[-n:]
+    
+    # Convert to time axis (ms)
+    t_ms = np.linspace(-(n / SAMPLE_RATE * 1000), 0, n)
+    
+    # Convert ADC values to voltage
+    if self._ymode == 0:  # Voltage mode
+        y1 = d1 / ADC_MAX * ADC_VREF
+        y2 = d2 / ADC_MAX * ADC_VREF
+    else:  # Raw ADC mode
+        y1, y2 = d1, d2
+    
+    # Update plot curves
+    if self.chk_ch1.isChecked():
+        self.curve1.setData(t_ms, y1)
+    
+    if self.chk_ch2.isChecked():
+        self.curve2.setData(t_ms, y2)
+```
+
+## GUI Features
+
+### Connection Control
+
+<Steps>
+  <Step title="Select Serial Port">
+    Choose from automatically detected COM ports or `/dev/ttyUSB*` devices.
+  </Step>
+  
+  <Step title="Configure Baud Rate">
+    Default: 115200 baud (must match ESP32 firmware).
+  </Step>
+  
+  <Step title="Connect">
+    Click "Conectar" to establish serial connection. Wait for ESP32 reset.
+  </Step>
+  
+  <Step title="Start Streaming">
+    Click "START" to begin ADC data acquisition.
+  </Step>
+</Steps>
+
+### Display Modes
+
+#### Voltage Mode (Default)
+- Converts 12-bit ADC values to 0-3.3V range
+- Y-axis labeled in volts
+- Formula: `voltage = (adc_value / 4095) × 3.3`
+
+#### Raw ADC Mode
+- Displays unscaled 0-4095 values
+- Useful for debugging and precision work
+- Shows full 12-bit resolution
+
+#### Auto Scale Mode
+- Automatically adjusts Y-axis to fit signal
+- Useful for small-amplitude signals
+- Updates dynamically as signal changes
+
+### Time Base Control
+
+Adjustable viewing window from 50 to 2000 samples:
+
+- **50 samples**: 5 ms window (high-frequency detail)
+- **500 samples**: 50 ms window (typical AC signals)
+- **2000 samples**: 200 ms window (low-frequency signals)
+
+```python
+def _on_time_changed(self, val):
+    self._n_samples = val
+    ms = val / SAMPLE_RATE * 1000
+    self.lbl_time.setText(f"{ms:.0f} ms")
+```
+
+### Live Measurements
+
+The GUI provides real-time measurements:
+
+#### Instantaneous Voltage
+Displays the most recent sample value for each channel:
+
+```python
+if len(d1) > 0 and d1.any():
+    v1_now = d1[-1] / ADC_MAX * ADC_VREF
+    self.lbl_v1.setText(f"{v1_now:.3f} V")
+```
+
+#### Frequency Estimation
+Automatic frequency detection using zero-crossing algorithm:
+
+```python
+def _estimate_freq(self, data: np.ndarray):
+    """Simple frequency detection via zero crossings."""
+    if len(data) < 10:
+        return
+    
+    # Find signal midpoint
+    mid = (data.max() + data.min()) / 2
+    above = data > mid
+    
+    # Detect rising edge crossings
+    crossings = np.where(np.diff(above.astype(np.int8)) == 1)[0]
+    
+    if len(crossings) >= 2:
+        periods = np.diff(crossings)  # Samples between crossings
+        avg_period_samples = periods.mean()
+        freq = SAMPLE_RATE / avg_period_samples
+        self.lbl_freq.setText(f"{freq:.1f} Hz")
+    else:
+        self.lbl_freq.setText("< detectable")
+```
+
+## Usage Examples
+
+### Measuring AC Signals
+
+<Steps>
+  <Step title="Connect Signal">
+    Connect an AC signal (0-3.3V) to GPIO 34 for CH1.
+  </Step>
+  
+  <Step title="Start Acquisition">
+    Click "START" in the GUI.
+  </Step>
+  
+  <Step title="Adjust Time Base">
+    Use the slider to show 2-3 complete cycles on screen.
+  </Step>
+  
+  <Step title="Read Measurements">
+    Check the frequency estimate and peak-to-peak voltage.
+  </Step>
+</Steps>
+
+### Comparing Two Signals
+
+```python
+# Enable both channels
+self.chk_ch1.setChecked(True)
+self.chk_ch2.setChecked(True)
+
+# Both plots share the same time axis for easy comparison
+self.plot2.setXLink(self.plot1)
+```
+
+This is useful for:
+- Input/output comparison in filters
+- Phase relationship analysis
+- Differential measurements
+- Before/after signal processing
+
+## Performance Characteristics
+
+### Timing Analysis
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Sample Rate | 10 kHz | Per channel |
+| Total Samples/sec | 20,000 | Both channels combined |
+| Serial Bandwidth | ~200 kbps | At 115200 baud |
+| GUI Refresh Rate | 20 fps | Smooth animation |
+| Latency | ~150 ms | Serial buffer + display |
+
+### Buffer Management
+
+```python
+# Circular buffers for thread-safe data transfer
+self.buf1 = deque(maxlen=BUFFER_LEN * 4)  # 8000 samples = 800ms
+self.buf2 = deque(maxlen=BUFFER_LEN * 4)
+
+# Display arrays
+self.data1 = np.zeros(BUFFER_LEN)  # 2000 samples = 200ms
+self.data2 = np.zeros(BUFFER_LEN)
+```
+
+The 4× buffer size prevents overflow if the GUI thread temporarily lags behind the serial thread.
+
+## Installation
+
+### Hardware Setup
+
+<Steps>
+  <Step title="Flash Firmware">
+    Upload `GENERADOR_OSCILOSCOPIO.ino` to ESP32 using Arduino IDE.
+  </Step>
+  
+  <Step title="Connect Probes">
+    - CH1: GPIO 34 (with voltage divider if needed)
+    - CH2: GPIO 35 (with voltage divider if needed)
+    - GND: ESP32 GND
+  </Step>
+  
+  <Step title="USB Connection">
+    Connect ESP32 to computer via USB cable.
+  </Step>
+</Steps>
+
+### Software Setup
+
+<CodeGroup>
+```bash Linux/macOS
+pip install PyQt5 pyqtgraph numpy pyserial
+python Serial/interfaz/GUIOSCI.py
+```
+
+```bash Windows
+pip install PyQt5 pyqtgraph numpy pyserial
+python Serial\interfaz\GUIOSCI.py
+```
+</CodeGroup>
+
+<Note>
+On Linux, you may need to add your user to the `dialout` group to access serial ports:
+```bash
+sudo usermod -a -G dialout $USER
+```
+Log out and back in for changes to take effect.
+</Note>
+
+## Advanced Features
+
+### FFT Analysis
+
+An alternative GUI (`GUIFFT.py`) includes frequency domain analysis:
+
+```python
+import scipy.fft
+
+# Compute FFT of signal
+fft_vals = scipy.fft.rfft(signal_data)
+fft_freqs = scipy.fft.rfftfreq(len(signal_data), 1/SAMPLE_RATE)
+fft_magnitude = np.abs(fft_vals)
+```
+
+### Digital Filtering
+
+The `oscilloscope_filter.ino` firmware includes optional digital filtering:
+
+```cpp
+// Simple moving average filter
+#define FILTER_SIZE 8
+int filter_buffer[FILTER_SIZE] = {0};
+int filter_index = 0;
+
+int filtered_read(int pin) {
+  int raw = analogRead(pin);
+  filter_buffer[filter_index] = raw;
+  filter_index = (filter_index + 1) % FILTER_SIZE;
+  
+  int sum = 0;
+  for (int i = 0; i < FILTER_SIZE; i++) {
+    sum += filter_buffer[i];
+  }
+  return sum / FILTER_SIZE;
+}
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No data appearing on screen">
+    - Verify ESP32 is connected and serial port is correct
+    - Check that "START" button was clicked after connecting
+    - Ensure input signals are within 0-3.3V range
+    - Try clicking "Limpiar buffers" to reset
+  </Accordion>
+  
+  <Accordion title="Frequency reading shows '< detectable'">
+    - Signal amplitude may be too small
+    - Frequency may be outside detectable range (< 5 Hz or > 2 kHz)
+    - Signal may not be periodic
+    - Adjust time base to show multiple complete cycles
+  </Accordion>
+  
+  <Accordion title="Connection fails immediately">
+    - ESP32 may be in bootloader mode - press RESET button
+    - Another program may be using the serial port
+    - Baud rate may not match firmware (should be 115200)
+    - Try unplugging and reconnecting USB cable
+  </Accordion>
+  
+  <Accordion title="Waveforms look choppy or frozen">
+    - Check CPU usage - GUI may be overloaded
+    - Reduce window size (fewer samples)
+    - Close other applications
+    - USB cable may be low quality - try a different one
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Signal Generator" icon="signal" href="/instruments/signal-generator">
+    Generate test signals using the ESP32 DAC outputs
+  </Card>
+  
+  <Card title="Back to Overview" icon="arrow-left" href="/instruments/overview">
+    Return to instruments overview
+  </Card>
+</CardGroup>

@@ -1,0 +1,470 @@
+---
+title: Sensors
+description: Sensor configurations, specifications, and usage in PhysisLab experiments
+---
+
+## Overview
+
+PhysisLab uses various sensors for physics measurements including IR sensors for free fall detection, ultrasonic sensors for distance measurement, and laser-based ToF sensors for high-precision ranging.
+
+## IR Sensors (Free Fall Detection)
+
+### Overview
+
+Infrared (IR) break-beam sensors are used in the free fall experiment to detect when an object passes through specific points, enabling precise time-of-flight measurements.
+
+### Specifications
+
+- **Type**: Reflective or break-beam IR sensor
+- **Operating Voltage**: 3.3V - 5V
+- **Output**: Digital (HIGH when blocked, LOW when clear)
+- **Response Time**: < 1 ms
+- **Detection Range**: 2-30 cm (depending on model)
+
+### Wiring Configuration
+
+From `freeFall3Sensores.ino:3-5`:
+
+```cpp
+#define PIN_INICIO      2   // INT0
+#define PIN_INTERMEDIO  3   // INT1  
+#define PIN_FINAL       4   // PCINT20 (PORTD)
+```
+
+**Arduino Connection**:
+```
+IR Sensor 1 (START)       → Arduino Pin 2 (with internal pull-up)
+IR Sensor 2 (INTERMEDIATE)→ Arduino Pin 3 (with internal pull-up)
+IR Sensor 3 (FINAL)       → Arduino Pin 4 (with internal pull-up)
+```
+
+**ESP32 Connection**:
+```
+IR Sensor START → GPIO 18 (with internal pull-up)
+IR Sensor END   → GPIO 5  (with internal pull-up)
+```
+
+### Setup Code (Arduino)
+
+From `freeFall3Sensores.ino:78-103`:
+
+```cpp
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_INICIO, INPUT_PULLUP);
+  pinMode(PIN_INTERMEDIO, INPUT_PULLUP);
+  pinMode(PIN_FINAL, INPUT_PULLUP);
+
+  // Interrupciones externas
+  attachInterrupt(digitalPinToInterrupt(PIN_INICIO), isrInicio, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_INTERMEDIO), isrIntermedio, FALLING);
+
+  // PCINT para PIN_FINAL
+  PCICR  |= (1 << PCIE2);
+  PCMSK2 |= (1 << PCINT20);
+
+  Serial.println("Sistema listo: 3 PIR con seguridad y Serial");
+}
+```
+
+### Interrupt Handling
+
+From `freeFall3Sensores.ino:30-48`:
+
+```cpp
+// PIR INICIO
+void isrInicio() {
+  if (estado == ESPERANDO_INICIO) {
+    noInterrupts();
+    contadorMs = 0;       // reinicia conteo
+    tInicio = 0;
+    estado = ESPERANDO_INTERMEDIO;
+    interrupts();
+  }
+}
+
+// PIR INTERMEDIO
+void isrIntermedio() {
+  if (estado == ESPERANDO_INTERMEDIO) {
+    noInterrupts();
+    tIntermedio = contadorMs;
+    estado = ESPERANDO_FINAL;
+    interrupts();
+  }
+}
+```
+
+### Typical Values
+
+- **Separation Distance (S1)**: 0.68 m (start to intermediate)
+- **Separation Distance (S2)**: 1.75 m (start to final)
+- **Time Resolution**: 1 ms (using Timer1)
+- **Expected Fall Time**: ~370 ms for 0.68 m drop
+
+## VL53L0X Laser Distance Sensor
+
+### Overview
+
+The VL53L0X is a Time-of-Flight (ToF) laser-ranging sensor that provides accurate distance measurements from 30mm to 2000mm.
+
+### Specifications
+
+- **Range**: 30 mm - 2000 mm
+- **Accuracy**: ±3% typical
+- **Field of View**: 25°
+- **Measurement Rate**: Up to 50 Hz
+- **Interface**: I2C (400 kHz)
+- **Operating Voltage**: 2.6V - 3.5V
+- **I2C Address**: 0x29 (default)
+
+### Pin Connections
+
+From `VL53_filtros.ino:100`:
+
+```cpp
+Wire.begin(21, 22);  // SDA = GPIO21, SCL = GPIO22
+```
+
+```
+VL53L0X Pin  →  ESP32 Pin
+-------------------------
+VIN          →  3.3V
+GND          →  GND
+SDA          →  GPIO 21
+SCL          →  GPIO 22
+GPIO1 (INT)  →  GPIO 27
+```
+
+### Initialization Code
+
+From `VL53_filtros.ino:98-116`:
+
+```cpp
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(21, 22);
+
+  pinMode(VL53_INT_PIN, INPUT_PULLUP);
+
+  if (!lox.begin()) {
+    Serial.println("Error VL53L0X");
+    while (1);
+  }
+
+  lox.configSensor(Adafruit_VL53L0X::VL53L0X_SENSE_HIGH_ACCURACY);
+
+  attachInterrupt(digitalPinToInterrupt(VL53_INT_PIN), vl53ISR, FALLING);
+
+  timer = timerBegin(0, 80, true);           // 1 µs tick
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, 200 * 1000, true);  // 200 ms
+  timerAlarmEnable(timer);
+}
+```
+
+### Reading Distance
+
+From `VL53_filtros.ino:126-141`:
+
+```cpp
+VL53L0X_RangingMeasurementData_t measure;
+lox.rangingTest(&measure, false);
+
+if (measure.RangeStatus == 0) {
+  // Tiempo
+  tNow = micros();
+  float dt = (tPrev == 0) ? 0.2 : (tNow - tPrev) * 1e-6;
+  tPrev = tNow;
+
+  // Distancia cruda (convertir mm a cm)
+  float raw = measure.RangeMilliMeter / 10.0;
+  
+  // Aplicar filtros...
+}
+```
+
+### Signal Filtering
+
+The VL53L0X readings are filtered using three different methods:
+
+#### 1. Exponential Moving Average (EMA)
+
+From `VL53_filtros.ino:33-36, 146-151`:
+
+```cpp
+const float alphaEMA = 0.2;
+float ema = 0.0;
+
+if (!emaInit) {
+  ema = raw;
+  emaInit = true;
+} else {
+  ema = alphaEMA * raw + (1.0 - alphaEMA) * ema;
+}
+```
+
+#### 2. Butterworth Low-Pass Filter (2nd Order)
+
+From `VL53_filtros.ino:40-50, 78-95`:
+
+```cpp
+// Butterworth 2º orden (fs=5Hz, fc≈0.8Hz)
+const float b0 = 0.2066;
+const float b1 = 0.4131;
+const float b2 = 0.2066;
+const float a1 = -0.3695;
+const float a2 = 0.1958;
+
+float butterworth(float x) {
+  if (!bwInit) {
+    bw_x1 = bw_x2 = x;
+    bw_y1 = bw_y2 = x;
+    bwInit = true;
+    return x;
+  }
+
+  float y = b0*x + b1*bw_x1 + b2*bw_x2
+            - a1*bw_y1 - a2*bw_y2;
+
+  bw_x2 = bw_x1;
+  bw_x1 = x;
+  bw_y2 = bw_y1;
+  bw_y1 = y;
+
+  return y;
+}
+```
+
+#### 3. Alpha-Beta (α-β) Filter
+
+From `VL53_filtros.ino:53-59, 161-170`:
+
+```cpp
+float alphaAB = 0.85;
+float betaAB  = 0.02;
+float posAB = 0.0;
+float velAB = 0.0;
+
+if (!abInit) {
+  posAB = raw;
+  velAB = 0.0;
+  abInit = true;
+} else {
+  float pred = posAB + velAB * dt;
+  float err  = raw - pred;
+  posAB = pred + alphaAB * err;
+  velAB = velAB + (betaAB * err) / dt;
+}
+```
+
+## HC-SR04 Ultrasonic Sensor
+
+### Overview
+
+The HC-SR04 is an ultrasonic distance sensor that uses sonar to determine distance to an object (2cm to 400cm).
+
+### Specifications
+
+- **Range**: 2 cm - 400 cm
+- **Accuracy**: ±3 mm
+- **Measuring Angle**: 15°
+- **Ultrasonic Frequency**: 40 kHz
+- **Operating Voltage**: 5V
+- **Trigger Pulse**: 10 μs (minimum)
+
+### Pin Connections
+
+```
+HC-SR04 Pin  →  ESP32 Pin
+--------------------------
+VCC          →  5V
+TRIG         →  GPIO 18
+ECHO         →  GPIO 19 (via level shifter or voltage divider)
+GND          →  GND
+```
+
+<Warning>
+**Important**: The ECHO pin outputs 5V. Use a voltage divider or level shifter to protect the ESP32 GPIO (3.3V max).
+
+Voltage divider: 
+- R1 = 1kΩ (from ECHO to GPIO)
+- R2 = 2kΩ (from GPIO to GND)
+</Warning>
+
+### Pin Definitions
+
+From `ultraSonido_filtros.ino:4-7`:
+
+```cpp
+#define TRIG_PIN 18
+#define ECHO_PIN 19
+```
+
+### Initialization
+
+From `ultraSonido_filtros.ino:109-121`:
+
+```cpp
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+  attachInterrupt(digitalPinToInterrupt(ECHO_PIN), echoISR, CHANGE);
+
+  timer = timerBegin(0, 80, true); // 1 µs tick
+  timerAttachInterrupt(timer, &onTimer, true);
+  timerAlarmWrite(timer, TRIGGER_INTERVAL_MS * 1000, true);
+  timerAlarmEnable(timer);
+}
+```
+
+### Measurement Process
+
+#### Trigger Signal
+
+From `ultraSonido_filtros.ino:81-85`:
+
+```cpp
+void IRAM_ATTR onTimer() {
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+}
+```
+
+#### Echo Detection
+
+From `ultraSonido_filtros.ino:69-76`:
+
+```cpp
+void IRAM_ATTR echoISR() {
+  if (digitalRead(ECHO_PIN) == HIGH) {
+    echoStart = micros();
+  } else {
+    echoEnd = micros();
+    echoReceived = true;
+  }
+}
+```
+
+#### Distance Calculation
+
+From `ultraSonido_filtros.ino:24, 143`:
+
+```cpp
+const float SOUND_SPEED = 0.0343;   // cm/us
+
+unsigned long duration = echoEnd - echoStart;
+float raw = (duration * SOUND_SPEED) / 2.0;
+```
+
+### Signal Filtering
+
+The ultrasonic sensor uses the same three filtering methods as the VL53L0X:
+
+- **EMA** (α = 0.3)
+- **Butterworth** (fs=10Hz, fc≈1Hz)
+- **α-β Filter** (α = 0.85, β = 0.05)
+
+From `ultraSonido_filtros.ino:40-64`:
+
+### Sample Output
+
+From `ultraSonido_filtros.ino:186-197`:
+
+```cpp
+Serial.print("tm,");
+Serial.print(dt,3);
+Serial.print("RAW,");
+Serial.print(raw,2);
+Serial.print("EMA,");
+Serial.print(ema,2);
+Serial.print("BW,");
+Serial.print(bw,2);
+Serial.print("POSAB,");
+Serial.print(posAB,2);
+Serial.print("Vel,");
+Serial.println(velAB,2);
+```
+
+## Sensor Calibration
+
+### VL53L0X Calibration
+
+1. **High Accuracy Mode**: Use `VL53L0X_SENSE_HIGH_ACCURACY` for best precision
+2. **Sampling Rate**: 5 Hz (200 ms intervals) for stable readings
+3. **Filter Tuning**: Adjust α values based on motion speed
+
+### Ultrasonic Sensor Calibration
+
+1. **Minimum Range**: Keep objects at least 5 cm away
+2. **Sampling Rate**: 10 Hz (100 ms intervals) recommended
+3. **Temperature Compensation**: Sound speed varies with temperature (~0.6 m/s per °C)
+
+```cpp
+// Adjust for temperature
+float temp_celsius = 20.0;  // measure actual temperature
+float sound_speed = 331.3 + (0.606 * temp_celsius);  // m/s
+float sound_speed_cm_us = sound_speed / 10000.0;     // cm/us
+```
+
+### IR Sensor Calibration
+
+1. **Alignment**: Ensure sensors are perpendicular to falling object path
+2. **Height Measurement**: Measure actual distance between sensors precisely
+3. **Threshold Adjustment**: Tune detection sensitivity to avoid false triggers
+
+## Troubleshooting
+
+### VL53L0X Issues
+
+**Problem**: Sensor not detected (begin() fails)
+- Check I2C wiring (SDA/SCL)
+- Verify 3.3V power supply
+- Try different I2C speed: `Wire.setClock(100000)` for 100 kHz
+
+**Problem**: Noisy readings
+- Increase sampling interval (reduce rate)
+- Use Butterworth filter for smoothing
+- Avoid reflective or transparent surfaces
+
+### HC-SR04 Issues
+
+**Problem**: Reading 0 or timeout
+- Check TRIG pulse is at least 10 μs
+- Verify ECHO pin voltage level (should be 3.3V after level shifter)
+- Ensure object is within 2-400 cm range
+
+**Problem**: Unstable readings
+- Add validation: ignore readings < 2 cm or > 400 cm
+- Use median filter for outlier rejection
+- Check for acoustic interference
+
+### IR Sensor Issues
+
+**Problem**: Missed detections
+- Increase pull-up resistor to 10kΩ
+- Add debouncing (10-50 ms delay)
+- Check alignment and focus
+
+**Problem**: False triggers
+- Shield from ambient IR sources (sunlight, incandescent bulbs)
+- Add hysteresis to detection logic
+- Use interrupt-driven detection
+
+## Best Practices
+
+1. **Power Supply**: Use stable, low-noise 3.3V/5V supply
+2. **Filtering**: Always filter sensor data for physics measurements
+3. **Sampling Rate**: Match to expected motion speed (faster motion = higher rate)
+4. **Validation**: Implement range checks to reject invalid readings
+5. **Calibration**: Measure and verify physical distances with ruler/caliper
+
+## Related Documentation
+
+- [ESP32 Configuration](/hardware/esp32)
+- [Free Fall Experiment](/experiments/free-fall)
+- [Kinematic Experiments](/experiments/kinematics)

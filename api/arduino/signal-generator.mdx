@@ -1,0 +1,421 @@
+---
+title: Signal Generator Firmware
+description: ESP32 firmware for dual-channel arbitrary waveform generation using DAC and DDS
+---
+
+## Overview
+
+The signal generator firmware provides dual-channel arbitrary waveform generation on ESP32 using the built-in DACs. It implements Direct Digital Synthesis (DDS) with lookup tables and hardware timers for precise waveform generation.
+
+## Pin Configuration
+
+```cpp
+#define DAC1_PIN 25  // DAC Channel 1 (GPIO 25)
+#define DAC2_PIN 26  // DAC Channel 2 (GPIO 26)
+```
+
+<Note>
+ESP32 has two 8-bit DAC channels: DAC1 on GPIO 25 and DAC2 on GPIO 26.
+</Note>
+
+## DDS Configuration
+
+```cpp
+#define SAMPLE_RATE 40000      // 40 kHz sample rate
+#define TABLE_SIZE 256         // Waveform lookup table size
+#define TIMER_DIVIDER 80       // APB clock divider
+#define TIMER_INTERVAL_US (1000000 / SAMPLE_RATE)  // 25 μs
+```
+
+### Sample Rate Calculation
+
+With 80 MHz APB clock and divider of 80:
+
+```
+Timer frequency = 80 MHz / 80 = 1 MHz
+Interval = 1,000,000 μs / 40,000 Hz = 25 μs
+```
+
+## Channel Structure
+
+```cpp
+typedef struct {
+  uint8_t dacPin;                           // DAC output pin
+  volatile uint32_t phaseAcc;               // Phase accumulator (16.16 fixed-point)
+  volatile uint32_t phaseStep;              // Phase increment per sample
+  volatile bool enabled;                    // Channel enable flag
+  uint8_t waveTableA[TABLE_SIZE];           // Primary lookup table
+  uint8_t waveTableB[TABLE_SIZE];           // Secondary lookup table (double-buffering)
+  volatile uint8_t* volatile activeWaveTable; // Pointer to active table
+  hw_timer_t* timer;                        // Hardware timer
+  portMUX_TYPE mux;                         // Mutex for critical sections
+} SignalChannel;
+```
+
+### Channel Instances
+
+```cpp
+SignalChannel ch1 = { 
+  DAC1_PIN, 0, 0, false, {}, {}, nullptr, nullptr, 
+  portMUX_INITIALIZER_UNLOCKED 
+};
+
+SignalChannel ch2 = { 
+  DAC2_PIN, 0, 0, false, {}, {}, nullptr, nullptr, 
+  portMUX_INITIALIZER_UNLOCKED 
+};
+```
+
+## Supported Waveforms
+
+### Waveform Generation
+
+```cpp
+void generateWaveToTable(uint8_t* table, const char* type, 
+                        float amplitude, float offset) {
+  amplitude = constrain(amplitude, 0, 255);
+  offset    = constrain(offset, 0, 255);
+  
+  for (int i = 0; i < TABLE_SIZE; i++) {
+    float val = 0;
+    float angle = (2.0 * PI * i) / TABLE_SIZE;
+    
+    if      (strcmp(type, "SINE")     == 0) 
+      val = (sin(angle) + 1) * 0.5;
+    else if (strcmp(type, "SQUARE")   == 0) 
+      val = (i < TABLE_SIZE/2) ? 1.0 : 0.0;
+    else if (strcmp(type, "TRIANGLE") == 0) 
+      val = (i < TABLE_SIZE/2) ? (2.0*i/TABLE_SIZE) 
+                                : (2.0 - 2.0*i/TABLE_SIZE);
+    else if (strcmp(type, "SAW")      == 0) 
+      val = (float)i / TABLE_SIZE;
+    else if (strcmp(type, "DC")       == 0) 
+      val = 0;
+    
+    table[i] = (uint8_t)constrain((val * amplitude) + offset, 0, 255);
+  }
+}
+```
+
+### Waveform Types
+
+| Waveform | Description | Formula |
+|----------|-------------|----------|
+| `SINE` | Sinusoidal wave | `(sin(θ) + 1) / 2` |
+| `SQUARE` | Square wave (50% duty) | `θ < π ? 1 : 0` |
+| `TRIANGLE` | Triangle wave | Linear ramp up/down |
+| `SAW` | Sawtooth wave | Linear ramp up |
+| `DC` | DC offset | Constant value |
+
+## DDS Phase Accumulator
+
+### Frequency Calculation
+
+```cpp
+void updateFrequency(SignalChannel* ch, float freq) {
+  portENTER_CRITICAL(&ch->mux);
+  ch->phaseStep = (uint32_t)((freq * TABLE_SIZE * 65536.0) / SAMPLE_RATE);
+  portEXIT_CRITICAL(&ch->mux);
+}
+```
+
+### Phase Step Formula
+
+```
+phaseStep = (frequency × TABLE_SIZE × 2^16) / SAMPLE_RATE
+```
+
+**Example**: For 1000 Hz at 40 kHz sample rate:
+
+```
+phaseStep = (1000 × 256 × 65536) / 40000 = 419,430,400
+```
+
+### Fixed-Point Arithmetic
+
+The phase accumulator uses 16.16 fixed-point format:
+
+- **Upper 16 bits**: Integer part (table index)
+- **Lower 16 bits**: Fractional part (sub-sample precision)
+
+```cpp
+ch->phaseAcc += ch->phaseStep;  // Add phase increment
+uint8_t idx = ch->phaseAcc >> 16;  // Extract table index
+```
+
+## Timer Interrupt Service Routines
+
+### Channel 1 ISR
+
+```cpp
+void IRAM_ATTR onTimerCh1() {
+  if (!ch1.enabled) return;
+  
+  ch1.phaseAcc += ch1.phaseStep;    // Increment phase
+  uint8_t idx = ch1.phaseAcc >> 16; // Get table index
+  
+  dac_output_voltage(DAC_CHANNEL_1, ch1.activeWaveTable[idx]);
+}
+```
+
+### Channel 2 ISR
+
+```cpp
+void IRAM_ATTR onTimerCh2() {
+  if (!ch2.enabled) return;
+  
+  ch2.phaseAcc += ch2.phaseStep;
+  uint8_t idx = ch2.phaseAcc >> 16;
+  
+  dac_output_voltage(DAC_CHANNEL_2, ch2.activeWaveTable[idx]);
+}
+```
+
+<Note>
+The `IRAM_ATTR` attribute places ISR code in IRAM for faster execution and to avoid cache misses.
+</Note>
+
+## Channel Initialization
+
+```cpp
+void initChannel(SignalChannel* ch, int timerID, void (*isr)()) {
+  // Initialize with sine wave
+  generateWaveToTable(ch->waveTableA, "SINE", 255, 0);
+  ch->activeWaveTable = ch->waveTableA;
+  
+  // Configure hardware timer
+  ch->timer = timerBegin(timerID, TIMER_DIVIDER, true);
+  timerAttachInterrupt(ch->timer, isr, true);
+  timerAlarmWrite(ch->timer, TIMER_INTERVAL_US, true);
+  timerAlarmEnable(ch->timer);
+}
+```
+
+## Command Protocol
+
+### Command Format
+
+```
+CH<channel> <waveform> <frequency> <enable> <amplitude> <offset>
+```
+
+**Parameters**:
+- `channel`: 1 or 2
+- `waveform`: SINE, SQUARE, TRIANGLE, SAW, DC
+- `frequency`: Frequency in Hz (float)
+- `enable`: 1 (on) or 0 (off)
+- `amplitude`: 0-255 (DAC units)
+- `offset`: 0-255 (DAC units)
+
+### Example Commands
+
+```
+CH1 SINE 1000.0 1 255 0
+CH2 SQUARE 500.0 1 128 64
+CH1 TRIANGLE 2000.0 0 200 50
+```
+
+### Command Processing
+
+```cpp
+void processCommand(String cmd) {
+  int channel;
+  char wave[10];
+  float freq;
+  int enable;
+  float amplitude;
+  float offset;
+  
+  if (sscanf(cmd.c_str(), "CH%d %s %f %d %f %f", 
+             &channel, wave, &freq, &enable, &amplitude, &offset) != 6)
+    return;
+  
+  SignalChannel* ch = (channel == 1) ? &ch1 : &ch2;
+  
+  // Use double-buffering for glitch-free updates
+  uint8_t* newTable = (ch->activeWaveTable == ch->waveTableA) 
+                      ? ch->waveTableB : ch->waveTableA;
+  
+  generateWaveToTable(newTable, wave, amplitude, offset);
+  
+  // Atomic update of channel parameters
+  portENTER_CRITICAL(&ch->mux);
+  ch->enabled = false;
+  ch->phaseAcc = 0;
+  ch->phaseStep = (uint32_t)((freq * TABLE_SIZE * 65536.0) / SAMPLE_RATE);
+  ch->activeWaveTable = newTable;
+  ch->enabled = (bool)enable;
+  portEXIT_CRITICAL(&ch->mux);
+}
+```
+
+## Setup Function
+
+```cpp
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  // Set default frequency to 1 kHz
+  updateFrequency(&ch1, 1000);
+  updateFrequency(&ch2, 1000);
+  
+  // Initialize channels with separate timers
+  initChannel(&ch1, 0, onTimerCh1);  // Timer 0 for CH1
+  initChannel(&ch2, 2, onTimerCh2);  // Timer 2 for CH2
+  
+  // Enable DAC outputs
+  dac_output_enable(DAC_CHANNEL_1);
+  dac_output_enable(DAC_CHANNEL_2);
+  
+  Serial.println("Generador listo - CH1 y CH2 totalmente independientes");
+}
+```
+
+## DAC Output
+
+### DAC API
+
+```cpp
+#include "driver/dac.h"
+
+// Enable DAC channel
+dac_output_enable(DAC_CHANNEL_1);  // GPIO 25
+dac_output_enable(DAC_CHANNEL_2);  // GPIO 26
+
+// Output voltage (0-255 = 0V to 3.3V)
+dac_output_voltage(DAC_CHANNEL_1, 128);  // ~1.65V
+```
+
+### Voltage Conversion
+
+```
+Voltage = (DAC_value / 255) × 3.3V
+```
+
+**Examples**:
+- `0` → 0V
+- `128` → 1.65V
+- `255` → 3.3V
+
+## Double Buffering
+
+The firmware uses double-buffering to prevent glitches during waveform updates:
+
+```cpp
+// Two lookup tables per channel
+uint8_t waveTableA[TABLE_SIZE];
+uint8_t waveTableB[TABLE_SIZE];
+volatile uint8_t* volatile activeWaveTable;
+
+// Generate new waveform in inactive table
+uint8_t* newTable = (ch->activeWaveTable == ch->waveTableA) 
+                    ? ch->waveTableB : ch->waveTableA;
+generateWaveToTable(newTable, wave, amplitude, offset);
+
+// Atomically switch to new table
+ch->activeWaveTable = newTable;
+```
+
+## Frequency Range
+
+### Minimum Frequency
+
+```
+f_min = SAMPLE_RATE / (TABLE_SIZE × 2^16) 
+      = 40000 / (256 × 65536) 
+      ≈ 0.0024 Hz
+```
+
+### Maximum Frequency
+
+```
+f_max = SAMPLE_RATE / 2  // Nyquist limit
+      = 40000 / 2 
+      = 20000 Hz (20 kHz)
+```
+
+<Warning>
+Frequencies above ~5 kHz may show distortion due to the 256-point lookup table. Increase `TABLE_SIZE` for higher frequency fidelity.
+</Warning>
+
+## Complete Example
+
+### Generate 1 kHz Sine Wave on CH1
+
+```
+CH1 SINE 1000.0 1 255 0
+```
+
+Response:
+```
+OK
+```
+
+### Generate 500 Hz Square Wave on CH2 with Offset
+
+```
+CH2 SQUARE 500.0 1 128 64
+```
+
+This produces:
+- **Amplitude**: 128 DAC units (0-128 swing)
+- **Offset**: 64 DAC units (centered at ~0.825V)
+- **Frequency**: 500 Hz
+
+## Key Features
+
+- **Dual independent channels** with separate timers
+- **DDS synthesis** with 16.16 fixed-point phase accumulator
+- **Five waveform types**: SINE, SQUARE, TRIANGLE, SAW, DC
+- **Configurable amplitude and offset** (0-255 DAC units)
+- **Frequency range**: 0.0024 Hz to 20 kHz
+- **40 kHz sample rate** for high-quality output
+- **Double buffering** for glitch-free waveform updates
+- **Thread-safe** with FreeRTOS critical sections
+- **Serial command interface** for real-time control
+
+## Hardware Timers
+
+ESP32 has 4 hardware timers:
+
+- **Timer 0**: Channel 1 (DAC1)
+- **Timer 1**: Available
+- **Timer 2**: Channel 2 (DAC2)
+- **Timer 3**: Available
+
+Using separate timers ensures truly independent operation of both channels.
+
+## Performance Considerations
+
+- ISRs are placed in IRAM (`IRAM_ATTR`) for fast execution
+- Lookup tables avoid expensive math operations in ISRs
+- Critical sections protect shared variables from race conditions
+- Double buffering prevents audio glitches during parameter updates
+
+## Integration with Oscilloscope
+
+This firmware is combined with the oscilloscope/ADC streaming functionality:
+
+```cpp
+void loop() {
+  // Handle serial commands for both DAC and ADC
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd == "ADC START") {
+      adcStreaming = true;
+    } else if (cmd == "ADC STOP") {
+      adcStreaming = false;
+    } else {
+      processCommand(cmd);  // Signal generator command
+    }
+  }
+  
+  // ADC streaming runs in parallel with signal generation
+  // ...
+}
+```
+
+See [Oscilloscope](/api/arduino/oscilloscope) for ADC functionality.

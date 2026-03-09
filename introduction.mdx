@@ -1,0 +1,164 @@
+---
+title: Introduction to PhysisLab
+description: A collection of low-cost physics laboratory experiments using computer vision, microcontrollers, and signal processing
+---
+
+## What is PhysisLab?
+
+PhysisLab is an open-source collection of low-cost physics laboratory experiments designed for educational purposes. The project enables students and educators to perform accurate physics measurements using accessible technology: webcams, ESP32 microcontrollers, and standard computers.
+
+By combining **computer vision**, **embedded systems**, and **signal processing**, PhysisLab transforms everyday hardware into precision measurement instruments for classical mechanics experiments.
+
+## Educational Philosophy
+
+PhysisLab bridges the gap between theoretical physics and experimental practice by:
+
+- **Reducing costs**: Experiments use common hardware instead of expensive lab equipment
+- **Teaching multiple disciplines**: Students learn physics, programming, electronics, and data analysis simultaneously
+- **Providing real-world skills**: Experience with OpenCV, Arduino, Python scientific computing, and signal processing
+- **Enabling reproducibility**: All code is open-source and experiments are well-documented
+
+## Available Experiments
+
+PhysisLab currently includes five major experiment categories:
+
+<CardGroup cols={2}>
+  <Card title="Free Fall" icon="arrow-down">
+    Measure gravitational acceleration by tracking falling objects using camera-based detection, microcontroller timing with IR sensors, or audio-based impact detection.
+  </Card>
+  
+  <Card title="Pendulum Motion" icon="circle-half-stroke">
+    Analyze simple pendulum dynamics including period measurement, amplitude decay, and gravitational constant determination using color-based tracking.
+  </Card>
+  
+  <Card title="Spring-Mass System" icon="wave-square">
+    Study harmonic oscillation, measure spring constants, calculate damping coefficients, and analyze transfer functions with homography-based calibration.
+  </Card>
+  
+  <Card title="Projectile Motion" icon="baseball">
+    Track parabolic trajectories, measure launch angles and velocities, and experimentally determine gravitational acceleration from 2D motion.
+  </Card>
+  
+  <Card title="Kinematics" icon="gauge-high">
+    Real-time position and velocity tracking using VL53L0X time-of-flight sensors or ultrasonic distance sensors with advanced filtering (Butterworth, α-β, EMA).
+  </Card>
+</CardGroup>
+
+## Three Measurement Approaches
+
+PhysisLab offers flexibility through three distinct measurement methodologies:
+
+### 1. Camera-Based (Computer Vision)
+
+Uses OpenCV for color-based object tracking and motion analysis:
+
+- **Technique**: HSV color space filtering, contour detection, frame-by-frame tracking
+- **Hardware**: Any USB webcam (30-60 fps recommended)
+- **Calibration**: Homography or affine transformations for pixel-to-meter conversion
+- **Experiments**: Free fall, pendulum, spring-mass, projectile motion, kinematics
+- **Advantages**: Non-contact measurement, captures full trajectory, rich visual feedback
+
+**Example**: The free fall camera experiment (`FreeFallCam.py`) detects when an object crosses two reference lines and calculates time intervals based on frame counting:
+
+```python
+DESIRED_FPS = 10
+RESOLUTION = (320, 240)
+
+# Real FPS measurement for accuracy
+real_fps = min(fps_from_cap, measured_fps)
+
+# Calculate time from frame difference
+delta_frames = frame_end - frame_start
+delta_t = delta_frames / real_fps
+```
+
+### 2. Microcontroller-Based (ESP32/Arduino)
+
+Uses ESP32 with sensors for high-precision timing:
+
+- **Technique**: Interrupt-driven detection, hardware timers, sensor polling with FreeRTOS
+- **Hardware**: ESP32 microcontroller, IR sensors, time-of-flight (VL53L0X), ultrasonic sensors
+- **Timing**: Microsecond precision using `micros()` function
+- **Experiments**: Free fall timing, kinematics with distance sensors
+- **Advantages**: High temporal resolution, low latency, compact setup
+
+**Example**: The free fall microcontroller system (`FreeFallEpsfreeRTOSFunciona.ino`) uses two IR sensors to measure time intervals:
+
+```cpp
+#define PIN_INICIO 18
+#define PIN_FIN    5
+
+// Capture start time on first sensor trigger
+if (!esperandoFin && estadoAntInicio == HIGH && estadoInicio == LOW) {
+  tInicio = micros();  // Microsecond precision
+  esperandoFin = true;
+}
+
+// Capture end time on second sensor trigger
+if (esperandoFin && estadoAntFin == HIGH && estadoFin == LOW) {
+  tFin = micros();
+  uint32_t delta = tFin - tInicio;  // Time in microseconds
+}
+```
+
+### 3. Audio-Based (Sound Detection)
+
+Uses microphone input to detect impact events:
+
+- **Technique**: Real-time audio streaming, RMS threshold detection, latency compensation
+- **Hardware**: Computer with microphone or headphone jack
+- **Sampling**: 44.1 kHz sample rate with configurable block sizes
+- **Experiments**: Free fall (ball drop impacts)
+- **Advantages**: Minimal setup, detects events invisible to camera
+
+**Example**: The sound detection system (`deteccion_por_sonido.py`) monitors audio RMS levels:
+
+```python
+SAMPLE_RATE = 44100
+BLOCK_SIZE = 8  # Small buffer for low latency
+THRESHOLD = 0.65
+
+# Calculate RMS and detect impacts
+audio = indata[:, 0]
+rms = np.sqrt(np.mean(audio**2))
+
+if rms > THRESHOLD:
+    event_times.append(time.perf_counter())
+    print(f"⚡ Event {len(event_times)} detected (RMS={rms:0.4f})")
+```
+
+## Signal Processing & Analysis
+
+All experiments include comprehensive data analysis with:
+
+- **Filtering**: Butterworth filters, exponential moving average (EMA), α-β filters
+- **Curve fitting**: Sinusoidal fitting for oscillations, parabolic fitting for trajectories
+- **Visualization**: Matplotlib plots for position, velocity, acceleration, phase space, frequency spectra
+- **System identification**: Transfer function analysis, Bode plots, pole-zero diagrams (spring-mass)
+
+## Bonus: Oscilloscope & Signal Generator
+
+PhysisLab includes a dual-channel oscilloscope and arbitrary waveform generator using ESP32:
+
+- **Oscilloscope**: 200 samples/second dual ADC, real-time streaming via serial/WebSocket
+- **Signal Generator**: Independent DAC channels with sine, square, triangle, sawtooth, and DC waveforms
+- **Control**: Python GUI interface with FFT analysis capabilities
+- **Sample rate**: 40 kHz DAC output, configurable ADC sampling
+
+<CardGroup cols={3}>
+  <Card title="Get Started" icon="rocket" href="/requirements">
+    Check hardware and software requirements
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Set up your development environment
+  </Card>
+  
+  <Card title="View Source" icon="github" href="https://github.com/Camibros314/PhysisLabGitcode">
+    Explore the complete source code
+  </Card>
+</CardGroup>
+
+<Note>
+**Academic Use**: PhysisLab is designed for physics education at the university level. All experiments include theoretical background, calibration procedures, uncertainty analysis, and comparison with expected values.
+</Note>

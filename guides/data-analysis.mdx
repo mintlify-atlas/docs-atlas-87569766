@@ -1,0 +1,526 @@
+---
+title: Data Analysis with NumPy & SciPy
+description: Analyze experimental data using curve fitting, derivatives, and statistical methods
+---
+
+PhysisLab uses NumPy and SciPy for robust data analysis, including curve fitting, derivative calculation, frequency analysis, and statistical processing. This guide shows you how to extract physics measurements from your experimental data.
+
+## Loading and Preparing Data
+
+### From Camera Tracking
+
+Load position vs. time data from video analysis:
+
+```python analisis.py (kinematic)
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Data structure: (t, x_m, y_m, theta_rad, vx, vy)
+data = np.loadtxt("datos_pendulo.txt", skiprows=1)
+
+t      = data[:, 0]  # Time (s)
+x_data = data[:, 1]  # X position (m)
+y_data = data[:, 2]  # Y position (m)
+theta  = data[:, 3]  # Angle (rad)
+```
+
+### From Microcontroller Measurements
+
+Load timing data from serial acquisition:
+
+```python procesar.py
+import numpy as np
+
+# Load free fall times
+times = []
+with open("mediciones_80cm.txt", "r") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            # Format: "2024-03-09 14:23:15, 0.404523"
+            t_str = line.split(",")[1].strip()
+            times.append(float(t_str))
+        except (IndexError, ValueError):
+            print(f"Skipping malformed line: {line}")
+
+times = np.array(times)
+print(f"Loaded {len(times)} measurements")
+```
+
+## Smoothing and Filtering
+
+### Moving Average Filter
+
+Simple smoothing for noisy position data:
+
+```python analisis.py (pendulum)
+def smooth(arr, w=5):
+    """Apply moving average with window size w."""
+    kernel = np.ones(w) / w
+    return np.convolve(arr, kernel, mode='same')
+
+# Smooth position data
+x_smooth = smooth(x_data, w=5)
+y_smooth = smooth(y_data, w=5)
+
+# Plot comparison
+plt.figure()
+plt.plot(t, x_data, 'o', ms=2, alpha=0.3, label='Raw')
+plt.plot(t, x_smooth, '-', lw=2, label='Smoothed')
+plt.xlabel('Time (s)')
+plt.ylabel('Position (m)')
+plt.legend()
+plt.show()
+```
+
+<Tip>
+Start with **w=5** for most tracking data. Increase to w=7 or w=9 if data is very noisy, but avoid over-smoothing which can hide real dynamics.
+</Tip>
+
+### Adaptive Window Size
+
+For data with varying noise levels:
+
+```python
+def adaptive_smooth(arr, base_window=5, noise_threshold=0.01):
+    """Increase smoothing in noisy regions."""
+    result = arr.copy()
+    
+    for i in range(len(arr)):
+        # Estimate local noise
+        start = max(0, i - base_window)
+        end = min(len(arr), i + base_window + 1)
+        local_std = np.std(arr[start:end])
+        
+        # Adjust window based on noise
+        w = base_window if local_std < noise_threshold else base_window * 2
+        window_start = max(0, i - w//2)
+        window_end = min(len(arr), i + w//2 + 1)
+        result[i] = np.mean(arr[window_start:window_end])
+    
+    return result
+```
+
+## Calculating Derivatives
+
+### Velocity from Position
+
+Use NumPy's gradient for numerical differentiation:
+
+```python analisis.py (pendulum)
+# Smooth position first
+x_s = smooth(x_data, w=5)
+y_s = smooth(y_data, w=5)
+
+# Calculate velocity (first derivative)
+vx = np.gradient(x_s, t)
+vy = np.gradient(y_s, t)
+
+# Smooth velocity
+vx = smooth(vx, w=5)
+vy = smooth(vy, w=5)
+
+# Total speed
+v_total = np.sqrt(vx**2 + vy**2)
+```
+
+### Acceleration from Velocity
+
+```python analisis.py (masa-resorte)
+# Second derivative
+ax = smooth(np.gradient(vx, t), w=5)
+ay = smooth(np.gradient(vy, t), w=5)
+
+# For free fall, ay should be approximately -g
+g_measured = -np.mean(ay[len(ay)//4 : 3*len(ay)//4])
+print(f"Measured g: {g_measured:.4f} m/s²")
+```
+
+<Note>
+**Always smooth before and after differentiation** to minimize noise amplification. The formula is:
+
+```python
+smooth → gradient → smooth
+```
+</Note>
+
+## Curve Fitting
+
+### Sinusoidal Fit (Pendulum)
+
+Fit damped oscillation to pendulum angle:
+
+```python analisis.py (pendulum)
+from scipy.optimize import curve_fit
+
+def seno_amort(t, A, omega, phi, gamma, offset):
+    """Damped sinusoid: A·exp(-γt)·cos(ωt + φ) + offset"""
+    return A * np.exp(-gamma * t) * np.cos(omega * t + phi) + offset
+
+# Initial parameter estimates
+A0     = (np.max(theta) - np.min(theta)) / 2
+off0   = np.mean(theta)
+omega0 = 2 * np.pi / (t[-1] / max(1, np.sum(np.diff(np.sign(theta - off0)) != 0) / 2))
+p0     = [A0, omega0, 0, 0.01, off0]
+
+# Perform fit
+try:
+    popt, pcov = curve_fit(seno_amort, t, theta, p0=p0, maxfev=10000)
+    A_fit, omega_fit, phi_fit, gamma_fit, off_fit = popt
+    
+    T_fit = 2 * np.pi / omega_fit
+    g_exp = (2 * np.pi / T_fit)**2 * L_cuerda
+    
+    print(f"Período: {T_fit:.4f} s")
+    print(f"Amortiguamiento γ: {gamma_fit:.4f} s⁻¹")
+    print(f"g experimental: {g_exp:.4f} m/s²")
+    
+    # Plot fit
+    t_fine = np.linspace(t[0], t[-1], 500)
+    plt.plot(t, np.degrees(theta), 'o', ms=3, alpha=0.4, label='Data')
+    plt.plot(t_fine, np.degrees(seno_amort(t_fine, *popt)), '-', lw=2, label='Fit')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Angle (°)')
+    plt.legend()
+    plt.show()
+    
+except Exception as e:
+    print(f"Fit failed: {e}")
+```
+
+### Parabolic Fit (Projectile Motion)
+
+Fit trajectory to extract initial velocity and gravity:
+
+```python analisis.py (parabolico)
+def tray_x(t, x0, vx0_fit):
+    """Horizontal motion: x = x₀ + vx₀·t"""
+    return x0 + vx0_fit * t
+
+def tray_y(t, y0, vy0_fit, g_fit):
+    """Vertical motion: y = y₀ + vy₀·t - ½g·t²"""
+    return y0 + vy0_fit * t - 0.5 * g_fit * t**2
+
+# Fit X (uniform motion)
+popt_x, pcov_x = curve_fit(tray_x, t, x_data, p0=[x_data[0], vx[0]])
+x0_fit, vx0_fit = popt_x
+perr_x = np.sqrt(np.diag(pcov_x))
+
+print(f"vx₀ = {vx0_fit:.4f} ± {perr_x[1]:.4f} m/s")
+
+# Fit Y (uniformly accelerated)
+popt_y, pcov_y = curve_fit(
+    tray_y, t, y_data,
+    p0=[y_data[0], vy[0], 9.8],
+    bounds=([-np.inf, -50, 0], [np.inf, 50, 20])
+)
+y0_fit, vy0_fit, g_fit = popt_y
+perr_y = np.sqrt(np.diag(pcov_y))
+
+print(f"vy₀ = {vy0_fit:.4f} ± {perr_y[1]:.4f} m/s")
+print(f"g = {g_fit:.4f} ± {perr_y[2]:.4f} m/s²")
+
+# Calculate derived quantities
+v0_fit = np.sqrt(vx0_fit**2 + vy0_fit**2)
+angulo_fit = np.degrees(np.arctan2(vy0_fit, vx0_fit))
+print(f"Launch velocity: {v0_fit:.4f} m/s at {angulo_fit:.2f}°")
+```
+
+### Exponential Fit (Damped System)
+
+For spring-mass with damping:
+
+```python analisis.py (masa-resorte)
+def sinusoide_amortiguada(t, A, omega, phi, gamma, offset):
+    return A * np.exp(-gamma * t) * np.cos(omega * t + phi) + offset
+
+# Estimate initial frequency from zero crossings
+y_centered = y_data - np.mean(y_data)
+cruces = np.where(np.diff(np.sign(y_centered)))[0]
+if len(cruces) >= 2:
+    T_est = 2 * np.mean(np.diff(t[cruces]))
+    omega_est = 2 * np.pi / T_est if T_est > 0 else 5.0
+else:
+    omega_est = 5.0
+
+A0 = (np.max(y_data) - np.min(y_data)) / 2
+p0 = [A0, omega_est, 0.0, 0.05, 0.0]
+bounds = ([0, 0.5, -np.pi, 0, -0.5],
+          [2, 50, np.pi, 5, 0.5])
+
+popt, pcov = curve_fit(sinusoide_amortiguada, t, y_data,
+                       p0=p0, bounds=bounds, maxfev=20000)
+A_fit, omega_fit, phi_fit, gamma_fit, off_fit = popt
+perr = np.sqrt(np.diag(pcov))
+
+T_fit = 2 * np.pi / omega_fit
+f_fit = 1.0 / T_fit
+
+# Natural frequency (undamped)
+omega0 = np.sqrt(omega_fit**2 + gamma_fit**2)
+k_fit = masa_kg * omega0**2  # Spring constant
+
+print(f"Spring constant k: {k_fit:.4f} N/m")
+print(f"Damping coefficient: {2 * masa_kg * gamma_fit:.6f} N·s/m")
+```
+
+## Statistical Analysis
+
+### Basic Statistics
+
+For repeated measurements (e.g., multiple free fall drops):
+
+```python procesar.py
+import numpy as np
+
+N = len(times)
+t_mean = np.mean(times)
+t_std = np.std(times, ddof=1)  # Sample standard deviation
+t_err = t_std / np.sqrt(N)     # Standard error of the mean
+
+print(f"Number of measurements: {N}")
+print(f"Mean time: {t_mean:.5f} s")
+print(f"Standard deviation: {t_std:.5f} s")
+print(f"Standard error: {t_err:.5f} s")
+
+# Calculate g for each measurement
+s = 0.80  # Distance (m)
+g_values = 2 * s / times**2
+g_mean = np.mean(g_values)
+g_err = g_mean * 2 * (t_err / t_mean)  # Error propagation
+
+print(f"\ng = {g_mean:.3f} ± {g_err:.3f} m/s²")
+```
+
+### Error Propagation
+
+For calculated quantities, propagate uncertainties:
+
+```python
+# For g = 2s/t², uncertainty is:
+# Δg/g = 2·Δt/t  (assuming Δs negligible)
+
+relative_error_t = t_err / t_mean
+relative_error_g = 2 * relative_error_t
+absolute_error_g = g_mean * relative_error_g
+
+print(f"Relative error in t: {relative_error_t*100:.2f}%")
+print(f"Relative error in g: {relative_error_g*100:.2f}%")
+print(f"g = {g_mean:.4f} ± {absolute_error_g:.4f} m/s²")
+```
+
+## Frequency Analysis
+
+### Power Spectral Density
+
+Detect dominant oscillation frequencies:
+
+```python analisis.py (masa-resorte)
+from scipy.signal import welch, find_peaks
+
+# Calculate PSD using Welch's method
+f_psd, Pxx = welch(y_data, fs=fps, nperseg=min(256, len(y_data)//2))
+
+# Find peaks
+peaks_idx, _ = find_peaks(Pxx, height=np.max(Pxx)*0.1)
+if len(peaks_idx) > 0:
+    f_peak = f_psd[peaks_idx[np.argmax(Pxx[peaks_idx])]]
+    print(f"Dominant frequency: {f_peak:.3f} Hz")
+
+# Plot
+plt.figure()
+plt.semilogy(f_psd, Pxx, lw=1.8)
+plt.axvline(f_fit, color='white', linestyle='--', label=f'Fit: {f_fit:.3f} Hz')
+plt.axvline(f_peak, color='yellow', linestyle=':', label=f'Peak: {f_peak:.3f} Hz')
+plt.xlabel('Frequency (Hz)')
+plt.ylabel('PSD [m²/Hz]')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.show()
+```
+
+### Period Detection from Zero Crossings
+
+```python
+def detect_period(t, signal):
+    """Estimate period from zero crossings."""
+    # Center signal around zero
+    signal_centered = signal - np.mean(signal)
+    
+    # Find zero crossings (sign changes)
+    crossings = np.where(np.diff(np.sign(signal_centered)))[0]
+    
+    if len(crossings) < 2:
+        return None
+    
+    # Half-period is the average spacing between crossings
+    half_periods = np.diff(t[crossings])
+    T = 2 * np.mean(half_periods)
+    
+    return T
+
+T_measured = detect_period(t, theta)
+if T_measured:
+    print(f"Measured period: {T_measured:.4f} s")
+    print(f"Frequency: {1/T_measured:.4f} Hz")
+```
+
+## Visualization with Matplotlib
+
+### Multi-Panel Figures
+
+Create comprehensive analysis plots:
+
+```python analisis.py (pendulum)
+plt.style.use('dark_background')
+
+fig, axs = plt.subplots(2, 2, figsize=(14, 8))
+fig.suptitle("Pendulum Analysis", fontsize=14, fontweight='bold')
+
+# Position X
+axs[0, 0].plot(t, x_data, 'o', ms=3, alpha=0.4, color='#00BFFF', label='Data')
+axs[0, 0].plot(t, x_smooth, '-', lw=2, color='#00BFFF', label='Smoothed')
+axs[0, 0].set_title("Position X vs Time")
+axs[0, 0].set_xlabel("t (s)")
+axs[0, 0].set_ylabel("x (m)")
+axs[0, 0].legend(fontsize=8)
+axs[0, 0].grid(alpha=0.3)
+
+# Position Y
+axs[0, 1].plot(t, y_data, 'o', ms=3, alpha=0.4, color='#FF6347', label='Data')
+axs[0, 1].plot(t, y_smooth, '-', lw=2, color='#FF6347', label='Smoothed')
+axs[0, 1].set_title("Position Y vs Time")
+axs[0, 1].set_xlabel("t (s)")
+axs[0, 1].set_ylabel("y (m)")
+axs[0, 1].legend(fontsize=8)
+axs[0, 1].grid(alpha=0.3)
+
+# Velocity X
+axs[1, 0].plot(t, vx, '-', lw=2, color='#7FFF00')
+axs[1, 0].axhline(0, color='white', lw=0.5, linestyle='--')
+axs[1, 0].set_title("Velocity X vs Time")
+axs[1, 0].set_xlabel("t (s)")
+axs[1, 0].set_ylabel("vx (m/s)")
+axs[1, 0].grid(alpha=0.3)
+
+# Velocity Y
+axs[1, 1].plot(t, vy, '-', lw=2, color='#FFD700')
+axs[1, 1].axhline(0, color='white', lw=0.5, linestyle='--')
+axs[1, 1].set_title("Velocity Y vs Time")
+axs[1, 1].set_xlabel("t (s)")
+axs[1, 1].set_ylabel("vy (m/s)")
+axs[1, 1].grid(alpha=0.3)
+
+fig.tight_layout()
+fig.savefig("analysis.png", dpi=150, bbox_inches='tight')
+plt.show()
+```
+
+### Phase Space Plots
+
+Visualize dynamical systems:
+
+```python analisis.py (masa-resorte)
+fig, ax = plt.subplots(figsize=(7, 7))
+sc = ax.scatter(y_data*100, vy*100, c=t, cmap='plasma', s=10, alpha=0.8)
+plt.colorbar(sc, ax=ax, label='t (s)')
+ax.set_xlabel("Displacement y (cm)")
+ax.set_ylabel("Velocity vy (cm/s)")
+ax.set_title("Phase Space (y, vy)")
+ax.axhline(0, color='gray', lw=0.5, linestyle=':')
+ax.axvline(0, color='gray', lw=0.5, linestyle=':')
+ax.grid(alpha=0.25)
+plt.show()
+```
+
+### Trajectory Plots
+
+```python analisis.py (parabolico)
+fig, ax = plt.subplots(figsize=(10, 6))
+sc = ax.scatter(x_data, y_data, c=t, cmap='plasma', s=18, alpha=0.85, zorder=3)
+plt.colorbar(sc, ax=ax, label='t (s)')
+
+# Overlay fit
+if ajuste_ok:
+    t_fine = np.linspace(t[0], t[-1], 800)
+    x_fit = tray_x(t_fine, x0_fit, vx0_fit)
+    y_fit = tray_y(t_fine, y0_fit, vy0_fit, g_fit)
+    ax.plot(x_fit, y_fit, '--', lw=2, color='white', label=f'Fit: g={g_fit:.3f} m/s²')
+
+ax.set_xlabel("x (m)")
+ax.set_ylabel("y (m)")
+ax.set_title("Projectile Trajectory")
+ax.legend()
+ax.grid(alpha=0.25)
+ax.set_aspect('equal')
+plt.show()
+```
+
+## Exporting Results
+
+### Save Data to File
+
+```python analisis.py (pendulum)
+np.savetxt("datos_pendulo.txt",
+           np.column_stack((t, x_data, y_data, theta, vx, vy)),
+           header="t(s)  x(m)  y(m)  theta(rad)  vx(m/s)  vy(m/s)")
+print("Data saved to 'datos_pendulo.txt'")
+```
+
+### Save with Metadata
+
+```python analisis.py (masa-resorte)
+header = (
+    f"t(s)  x(m)  y(m)  y_desp(m)  vx(m/s)  vy(m/s)  ax(m/s2)  ay(m/s2)\n"
+    f"# k={k_fit:.4f} N/m  c={c_fit:.6f} N·s/m  omega0={omega0:.4f} rad/s  zeta={zeta:.4f}"
+)
+np.savetxt("datos_masa_resorte.txt",
+           np.column_stack((t, x_data, y_data, y_desp, vx, vy, ax, ay)),
+           header=header)
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Data Quality" icon="check">
+    - Remove outliers before analysis
+    - Smooth noisy data appropriately
+    - Check for systematic errors
+    - Validate with multiple methods
+  </Card>
+  
+  <Card title="Fitting" icon="chart-line">
+    - Provide good initial guesses
+    - Use bounds to constrain parameters
+    - Check fit residuals
+    - Report uncertainties from covariance
+  </Card>
+  
+  <Card title="Visualization" icon="eye">
+    - Plot raw and processed data
+    - Use color to show time evolution
+    - Include fit curves for comparison
+    - Save high-resolution figures (dpi=150+)
+  </Card>
+  
+  <Card title="Documentation" icon="book">
+    - Include units in all labels
+    - Save parameters with data
+    - Document processing steps
+    - Keep analysis scripts versioned
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Camera Tracking" icon="video" href="/guides/camera-tracking">
+    Generate position data for analysis
+  </Card>
+  
+  <Card title="Examples" icon="flask" href="/experiments/free-fall">
+    See complete analysis workflows
+  </Card>
+</CardGroup>

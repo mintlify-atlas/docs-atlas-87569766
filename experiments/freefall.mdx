@@ -1,0 +1,428 @@
+---
+title: 'Free Fall Experiment'
+description: 'Measure gravitational acceleration using camera tracking, microcontroller sensors, or audio detection'
+---
+
+## Overview
+
+The free fall experiment allows you to measure Earth's gravitational acceleration (g ≈ 9.8 m/s²) by tracking an object as it falls. PhysisLab provides three different measurement approaches, each with unique advantages.
+
+## Physics Theory
+
+For an object in free fall (neglecting air resistance):
+
+**Position**: $y(t) = y_0 + v_0 t - \frac{1}{2}g t^2$
+
+**Velocity**: $v(t) = v_0 - g t$
+
+**Acceleration**: $a = -g \approx -9.8 \text{ m/s}^2$
+
+For a drop from rest ($v_0 = 0$) over distance $h$:
+
+$$g = \frac{2h}{t^2}$$
+
+Where:
+- $h$ is the fall distance (meters)
+- $t$ is the time of fall (seconds)
+- $g$ is gravitational acceleration (m/s²)
+
+## Measurement Methods
+
+<Tabs>
+  <Tab title="Camera Tracking">
+    ### Camera-Based Measurement
+    
+    Track a colored object through video frames to measure fall time.
+    
+    **Source**: `~/workspace/source/FreeFall/freeFallCam/FreeFallCam.py`
+    
+    #### Hardware Requirements
+    - Camera (webcam, USB camera, or phone camera)
+    - Colored ball or object (bright, solid color)
+    - Ruler or measuring tape for calibration
+    - Good lighting
+    
+    #### How It Works
+    
+    The script uses OpenCV to:
+    1. Detect the object using HSV color filtering
+    2. Track centroid position frame-by-frame
+    3. Detect when object crosses start/end lines
+    4. Calculate elapsed frames and convert to time using FPS
+    
+    #### Setup Procedure
+    
+    <Steps>
+      <Step title="Configure Parameters">
+        Edit the configuration section:
+        ```python
+        DESIRED_FPS = 10   # Adjust based on camera
+        RESOLUTION = (320, 240)
+        tolerance = np.array([25, 85, 85])  # HSV tolerance
+        ```
+      </Step>
+      
+      <Step title="Calibrate Color">
+        Run the script and capture a reference frame:
+        ```bash
+        python FreeFallCam.py
+        ```
+        - Press SPACE to capture image
+        - Select ROI around your colored object
+        - The script automatically calculates HSV range
+      </Step>
+      
+      <Step title="Mark Start and End Lines">
+        Click two positions on the image:
+        - First click: start line (top)
+        - Second click: end line (bottom)
+        - These define your measurement region
+      </Step>
+      
+      <Step title="Run Measurements">
+        - Drop the object through the marked region
+        - System detects when object crosses lines
+        - Press **G** to save measurement or **D** to discard
+        - Repeat for multiple trials
+      </Step>
+    </Steps>
+    
+    #### Key Code Sections
+    
+    **FPS Measurement** (`FreeFallCam.py:41-57`):
+    ```python
+    fps_from_cap = cap.get(cv2.CAP_PROP_FPS)
+    if fps_from_cap == 0:
+        fps_from_cap = DESIRED_FPS
+    
+    # Measure actual FPS
+    num_test_frames = 60
+    start = time.time()
+    for i in range(num_test_frames):
+        ret, frame = cap.read()
+    end = time.time()
+    measured_fps = num_test_frames / (end - start)
+    
+    real_fps = min(fps_from_cap, measured_fps)
+    ```
+    
+    **Line Crossing Detection** (`FreeFallCam.py:160-175`):
+    ```python
+    if state == "WAIT_START":
+        if prev_cy < y_start_line and cy >= y_start_line:
+            frame_start = frame_count
+            state = "WAIT_END"
+    
+    elif state == "WAIT_END":
+        if prev_cy < y_end_line and cy >= y_end_line:
+            frame_end = frame_count
+            delta_frames = frame_end - frame_start
+            delta_t = delta_frames / real_fps
+    ```
+    
+    #### Output
+    Data saved to `datos_tiempo.txt`:
+    ```
+    Delta_frames, Delta_t(s)
+    15, 1.500000
+    14, 1.400000
+    ```
+  </Tab>
+  
+  <Tab title="Microcontroller Sensors">
+    ### Arduino/ESP32 with PIR Sensors
+    
+    Use passive infrared (PIR) sensors to detect when object passes, with hardware timer for precise timing.
+    
+    **Source**: `~/workspace/source/FreeFall/Micro-procesador/freeFallArduino_int/freeFallArduino_int.ino`
+    
+    #### Hardware Requirements
+    - Arduino Uno/Nano or ESP32
+    - 2× PIR motion sensors
+    - Jumper wires
+    - Power supply
+    
+    #### Wiring
+    
+    | Component | Arduino Pin |
+    |-----------|-------------|
+    | PIR Sensor 1 (Start) | Digital Pin 2 (INT0) |
+    | PIR Sensor 2 (End) | Digital Pin 3 (INT1) |
+    | PIR VCC | 5V |
+    | PIR GND | GND |
+    
+    #### How It Works
+    
+    The firmware uses:
+    - **Hardware Timer1** configured for 1ms precision
+    - **External interrupts** (INT0, INT1) for sensor triggers
+    - **State machine** to ensure proper start→end sequence
+    
+    #### Arduino Code Walkthrough
+    
+    **Timer1 Configuration** (`freeFallArduino_int.ino:46-55`):
+    ```cpp
+    // Configure Timer1 for 1ms interrupts
+    TCCR1A = 0;
+    TCCR1B = 0;
+    TCNT1  = 0;
+    OCR1A = 249;                 // 250 ticks → 1 ms
+    TCCR1B |= (1 << WGM12);      // CTC mode
+    TCCR1B |= (1 << CS11) | (1 << CS10); // Prescaler 64
+    TIMSK1 |= (1 << OCIE1A);     // Enable interrupt
+    ```
+    
+    **Timer ISR** (`freeFallArduino_int.ino:14-16`):
+    ```cpp
+    ISR(TIMER1_COMPA_vect) {
+      contadorMs++;
+    }
+    ```
+    
+    **Start Sensor Interrupt** (`freeFallArduino_int.ino:19-27`):
+    ```cpp
+    void isrInicio() {
+      if (esperandoInicio) {
+        noInterrupts();
+        contadorMs = 0;           // Reset timer
+        esperandoInicio = false;
+        esperandoFin = true;
+        interrupts();
+      }
+    }
+    ```
+    
+    **End Sensor Interrupt** (`freeFallArduino_int.ino:30-38`):
+    ```cpp
+    void isrFin() {
+      if (esperandoFin) {
+        noInterrupts();
+        esperandoFin = false;
+        esperandoInicio = true;
+        datoListo = true;
+        interrupts();
+      }
+    }
+    ```
+    
+    #### Data Collection
+    
+    Python script to capture serial output (`almacenar.py:1-36`):
+    ```python
+    import serial
+    import re
+    
+    puerto = '/dev/ttyUSB0'  # Adjust for your system
+    baudrate = 115200
+    archivo_txt = 'Tiempos_96cm.txt'
+    
+    patron_delta = re.compile(r'DELTA\s*=\s*(\d+)\s*us')
+    ser = serial.Serial(puerto, baudrate, timeout=1)
+    
+    while True:
+        linea = ser.readline().decode('utf-8').strip()
+        if linea:
+            match = patron_delta.search(linea)
+            if match:
+                delta = match.group(1)
+                with open(archivo_txt, 'a') as f:
+                    f.write(delta + '\n')
+    ```
+    
+    #### Output
+    Serial output shows time in milliseconds:
+    ```
+    TIEMPO = 441 ms
+    ------------------
+    TIEMPO = 439 ms
+    ------------------
+    ```
+  </Tab>
+  
+  <Tab title="Audio Detection">
+    ### Microphone-Based Timing
+    
+    Detect impact sounds using your computer's microphone or earbuds.
+    
+    **Source**: `~/workspace/source/FreeFall/FreeFallPython-Sonido/deteccion_por_sonido.py`
+    
+    #### Hardware Requirements
+    - Computer with microphone
+    - Earbuds with microphone (recommended for lower latency)
+    - Object that makes audible impact sound
+    
+    #### How It Works
+    
+    1. Calculates RMS (root mean square) of audio signal
+    2. Compares RMS to threshold to detect impacts
+    3. Records timestamps of two consecutive impacts
+    4. Applies latency correction based on buffer size
+    
+    #### Configuration
+    
+    **Audio Parameters** (`deteccion_por_sonido.py:8-14`):
+    ```python
+    SAMPLE_RATE = 44100
+    BLOCK_SIZE = 8            # Small buffer = low latency
+    THRESHOLD = 0.65          # Adjust based on noise
+    MAX_EVENTS = 2            # Two impacts: start and end
+    START_DELAY = 2.5         # Setup time (seconds)
+    DEVICE_INDEX = 0          # Microphone device ID
+    
+    LATENCY_ESTIMATED = BLOCK_SIZE / SAMPLE_RATE
+    ```
+    
+    #### Key Code Sections
+    
+    **RMS Calculation** (`deteccion_por_sonido.py:41-73`):
+    ```python
+    def audio_callback(indata, frames, time_info, status):
+        audio = indata[:, 0]
+        rms = np.sqrt(np.mean(audio**2))
+        now = time.perf_counter()
+        
+        # Pre-roll period to stabilize
+        if not pre_roll_done:
+            if pre_roll_start is None:
+                pre_roll_start = now
+            elif now - pre_roll_start >= pre_roll_duration:
+                pre_roll_done = True
+            return
+        
+        # Visual RMS bar
+        if armed and (now - last_print) > 0.1:
+            bar = "#" * int(min(rms / THRESHOLD, 1) * 20)
+            print(f"\rRMS: {rms:0.4f} | {bar:<20}", end="")
+        
+        # Detect events
+        if rms > THRESHOLD:
+            if len(event_times) == 0 or (now - event_times[-1]) > 0.1:
+                event_times.append(now)
+                print(f"\n⚡ Event {len(event_times)} detected")
+    ```
+    
+    **Latency Correction** (`deteccion_por_sonido.py:95-103`):
+    ```python
+    if len(event_times) == 2:
+        t1, t2 = event_times
+        delta_raw = t2 - t1
+        delta_corrected = delta_raw - LATENCY_ESTIMATED
+        
+        print(f"\nΔt bruto         : {delta_raw*1000:.3f} ms")
+        print(f"Latencia estimada : {LATENCY_ESTIMATED*1000:.3f} ms")
+        print(f"Δt corregido      : {delta_corrected*1000:.3f} ms")
+    ```
+    
+    #### Running the Experiment
+    
+    <Steps>
+      <Step title="Test Audio Levels">
+        Run the script to see RMS levels:
+        ```bash
+        python deteccion_por_sonido.py
+        ```
+        Make test sounds and observe the bar graph
+      </Step>
+      
+      <Step title="Adjust Threshold">
+        Modify `THRESHOLD` if needed:
+        - Too low: False triggers from ambient noise
+        - Too high: Misses actual impacts
+      </Step>
+      
+      <Step title="Perform Measurement">
+        - System arms after 2.5 seconds
+        - Drop object to create first impact (start sensor)
+        - Object falls and hits second surface (end sensor)
+        - Choose to save [s], discard [d], or quit [q]
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Data Analysis
+
+Once you have collected timing data, calculate g:
+
+### Calculation
+
+For a known drop height $h$:
+
+$$g = \frac{2h}{t^2}$$
+
+### Example Analysis
+
+```python
+import numpy as np
+
+# Your measurements
+height = 0.96  # meters
+times = np.array([0.441, 0.439, 0.443, 0.440])  # seconds
+
+# Calculate g for each trial
+g_values = 2 * height / (times**2)
+
+# Statistics
+g_mean = np.mean(g_values)
+g_std = np.std(g_values)
+g_uncertainty = g_std / np.sqrt(len(g_values))
+
+print(f"g = {g_mean:.3f} ± {g_uncertainty:.3f} m/s²")
+print(f"Percent error: {abs(g_mean - 9.8) / 9.8 * 100:.1f}%")
+```
+
+### Expected Results
+
+Typical results:
+- **Measured g**: 9.5 - 10.2 m/s²
+- **Percent error**: 1-5%
+- **Main error sources**: Air resistance, timing precision, human reaction time
+
+## Tips for Best Results
+
+<AccordionGroup>
+  <Accordion title="Camera Method">
+    - Use bright, solid-colored objects with good contrast
+    - Ensure even lighting without shadows
+    - Higher FPS cameras give better time resolution
+    - Keep camera stable with a tripod
+    - Measure start/end distance with ruler for calibration
+  </Accordion>
+  
+  <Accordion title="Microcontroller Method">
+    - Position sensors with clear line of sight
+    - Shield sensors from ambient IR sources
+    - Use stable power supply to avoid noise
+    - Measure sensor separation distance accurately
+    - Perform multiple trials and average results
+  </Accordion>
+  
+  <Accordion title="Audio Method">
+    - Use earbuds/headphones microphone for lower latency
+    - Quiet environment reduces false triggers
+    - Hard surfaces create clearer impact sounds
+    - Adjust threshold for your specific setup
+    - Consider buffer size vs latency tradeoff
+  </Accordion>
+</AccordionGroup>
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Camera not detecting object | Adjust HSV tolerance, improve lighting, use brighter color |
+| PIR sensors not triggering | Check wiring, verify 5V power, test sensor range |
+| Audio false triggers | Increase threshold, use quieter room, try earbuds mic |
+| Inconsistent results | Ensure consistent drop height, reduce air currents, average multiple trials |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Pendulum Experiment" icon="gauge" href="/experiments/pendulum">
+    Explore periodic motion and energy conservation
+  </Card>
+  
+  <Card title="Data Analysis Guide" icon="chart-line" href="/guides/data-analysis">
+    Learn to analyze experimental data
+  </Card>
+</CardGroup>

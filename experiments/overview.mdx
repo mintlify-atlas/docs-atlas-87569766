@@ -1,0 +1,133 @@
+---
+title: 'Experiments Overview'
+description: 'Explore physics experiments with camera, microcontroller, and audio measurement approaches'
+---
+
+## Introduction
+
+PhysisLab provides a comprehensive suite of physics experiments designed for educational purposes. Each experiment can be conducted using multiple measurement approaches, allowing you to choose the method that best fits your available equipment and learning objectives.
+
+## Available Experiments
+
+<CardGroup cols={2}>
+  <Card title="Free Fall" icon="arrow-down" href="/experiments/freefall">
+    Study gravitational acceleration through falling objects using camera tracking, PIR sensors, or audio detection
+  </Card>
+  
+  <Card title="Pendulum" icon="gauge" href="/experiments/pendulum">
+    Analyze simple harmonic motion, period, and energy conservation with video tracking and pivot detection
+  </Card>
+  
+  <Card title="Spring-Mass System" icon="wave-pulse" href="/experiments/spring-mass">
+    Investigate Hooke's law, oscillations, and damping with advanced homography-based tracking
+  </Card>
+  
+  <Card title="Projectile Motion" icon="baseball" href="/experiments/projectile-motion">
+    Study 2D kinematics with parabolic trajectory analysis and initial velocity calculations
+  </Card>
+  
+  <Card title="Kinematics" icon="gauge-simple-high" href="/experiments/kinematics">
+    Measure linear motion using camera tracking or time-of-flight distance sensors
+  </Card>
+</CardGroup>
+
+## Measurement Approaches
+
+PhysisLab experiments support three primary measurement methods:
+
+### 1. Camera-Based Tracking
+
+Use computer vision and OpenCV to track colored objects through video:
+
+- **Advantages**: High spatial resolution, complete trajectory visualization, works with consumer cameras
+- **Requirements**: Camera (webcam or phone), colored markers, adequate lighting
+- **Best for**: Pendulum, spring-mass, projectile motion, kinematics
+
+**Key Features**:
+- HSV color space filtering for robust detection
+- Homography and affine transformations for accurate calibration
+- Frame-by-frame position tracking with sub-pixel accuracy
+- Automated data export for analysis
+
+### 2. Microcontroller-Based Sensors
+
+Use Arduino or ESP32 with sensors for precise timing measurements:
+
+- **Advantages**: High temporal precision (microsecond resolution), real-time data, low latency
+- **Requirements**: Arduino/ESP32, PIR sensors or ToF sensors, breadboard and wiring
+- **Best for**: Free fall timing, kinematics with distance sensors
+
+**Key Features**:
+- Interrupt-driven timing for accuracy
+- Hardware timers for microsecond precision
+- Multiple sensor support (PIR, VL53L0X, ultrasonic)
+- Digital filtering (EMA, Butterworth, α-β filter)
+
+### 3. Audio-Based Detection
+
+Use microphone input to detect impact sounds:
+
+- **Advantages**: No hardware required, simple setup, good for timing measurements
+- **Requirements**: Computer with microphone or earbuds with mic
+- **Best for**: Free fall experiments with audible impacts
+
+**Key Features**:
+- RMS-based sound level detection
+- Configurable threshold and sensitivity
+- Low-latency audio processing
+- Latency correction for accurate timing
+
+## Physics Principles
+
+Each experiment explores fundamental physics concepts:
+
+| Experiment | Key Principles | Measured Quantities |
+|------------|----------------|--------------------|
+| **Free Fall** | Gravitational acceleration, uniformly accelerated motion | g, time of fall, velocity |
+| **Pendulum** | Simple harmonic motion, conservation of energy | Period T, frequency, amplitude, damping |
+| **Spring-Mass** | Hooke's law, oscillations, damping | Spring constant k, damping coefficient, frequency |
+| **Projectile Motion** | 2D kinematics, parabolic trajectories | Initial velocity, launch angle, range, max height |
+| **Kinematics** | Linear motion, velocity, acceleration | Position, velocity, acceleration vs time |
+
+## Data Analysis
+
+All experiments include comprehensive data analysis capabilities:
+
+- **Position tracking** with pixel-to-meter calibration
+- **Velocity and acceleration** calculation via numerical differentiation
+- **Curve fitting** (sinusoidal, parabolic, linear) with SciPy
+- **Statistical analysis** with uncertainty quantification
+- **Visualization** using Matplotlib with publication-quality plots
+- **Export formats** for further analysis in spreadsheets or other tools
+
+## Getting Started
+
+<Steps>
+  <Step title="Choose Your Experiment">
+    Select an experiment from the cards above based on your learning objectives
+  </Step>
+  
+  <Step title="Review Requirements">
+    Check the hardware and software requirements for your chosen measurement method
+  </Step>
+  
+  <Step title="Follow the Procedure">
+    Each experiment page provides detailed step-by-step instructions
+  </Step>
+  
+  <Step title="Analyze Your Data">
+    Use the provided analysis scripts to visualize and interpret your results
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Start with Free Fall" icon="play" href="/experiments/freefall">
+    The simplest experiment to begin your journey
+  </Card>
+  
+  <Card title="Setup Guide" icon="screwdriver-wrench" href="/installation">
+    Configure your environment and hardware
+  </Card>
+</CardGroup>

@@ -1,0 +1,326 @@
+---
+title: Free Fall Detector Circuit
+description: IR sensor-based free fall timing circuit with microsecond precision
+---
+
+## Overview
+
+The Free Fall Detector is a precision timing circuit designed to measure the time of free fall using infrared (IR) sensors. The system uses an ESP32 microcontroller to detect when an object passes through two IR beam gates and calculates the elapsed time with microsecond accuracy.
+
+## Circuit Design
+
+### Component List
+
+- **Microcontroller**: ESP32 development board
+- **Sensors**: 2x IR photogate sensors (transmitter/receiver pairs)
+- **Resistors**: Pull-up resistors (10kΩ recommended) for sensor inputs
+- **Power Supply**: 5V USB or regulated power supply
+- **Connectors**: Jumper wires, breadboard or PCB
+
+### Pin Assignments
+
+| Function | GPIO Pin | Configuration |
+|----------|----------|---------------|
+| Start Gate (IR Sensor 1) | GPIO 18 | INPUT_PULLUP |
+| End Gate (IR Sensor 2) | GPIO 5 or 26 | INPUT_PULLUP |
+
+### Circuit Connections
+
+```
+IR Sensor 1 (Start Gate)
+├── VCC → 5V
+├── GND → GND
+└── OUT → GPIO 18 (with 10kΩ pull-up to 3.3V)
+
+IR Sensor 2 (End Gate)
+├── VCC → 5V
+├── GND → GND
+└── OUT → GPIO 5 or GPIO 26 (with 10kΩ pull-up to 3.3V)
+
+ESP32
+├── VIN → 5V power supply
+├── GND → Common ground
+├── GPIO 18 → IR Sensor 1 output
+└── GPIO 5/26 → IR Sensor 2 output
+```
+
+### Circuit Diagram Description
+
+The circuit uses two IR photogate sensors positioned vertically at a known distance apart. Each sensor consists of an IR LED transmitter and a phototransistor receiver facing each other. When an object breaks the IR beam, the sensor output transitions from HIGH to LOW.
+
+The ESP32 internal pull-up resistors (configured via INPUT_PULLUP) keep the sensor pins at 3.3V when the beam is unbroken. When the beam is broken, the sensor pulls the pin to ground (LOW).
+
+## Electrical Specifications
+
+### Input Specifications
+- **Input Voltage Range**: 0V (LOW) to 3.3V (HIGH)
+- **Logic Threshold**: ~1.65V (typical for ESP32)
+- **Input Impedance**: ~45kΩ (with internal pull-up enabled)
+- **Maximum Input Current**: 12mA per pin
+
+### Power Requirements
+- **ESP32 Operating Voltage**: 3.3V (regulated internally from 5V VIN)
+- **IR Sensor Supply**: 5V DC
+- **Total Current Consumption**: ~100-200mA (depends on IR sensor current)
+- **Recommended Power Supply**: 5V @ 500mA minimum
+
+### Timing Specifications
+- **Timing Resolution**: 1 microsecond (using `micros()` function)
+- **Sampling Rate**: 1ms polling interval (configurable)
+- **Maximum Measurable Time**: ~70 minutes (before micros() overflow)
+- **Minimum Detectable Pulse**: ~1ms (depends on polling implementation)
+
+## Firmware Implementation
+
+### Polling-Based Implementation (FreeRTOS)
+
+This implementation uses FreeRTOS task scheduling for robust timing measurements:
+
+```cpp
+#include <Arduino.h>
+
+#define PIN_INICIO 18
+#define PIN_FIN    5
+
+void tareaPolling(void *param) {
+  uint8_t estadoAntInicio = HIGH;
+  uint8_t estadoAntFin    = HIGH;
+
+  uint32_t tInicio = 0;
+  uint32_t tFin    = 0;
+
+  bool esperandoFin = false; // Blocks new start until end is captured
+
+  while (true) {
+    uint8_t estadoInicio = digitalRead(PIN_INICIO);
+    uint8_t estadoFin    = digitalRead(PIN_FIN);
+    uint32_t ahora = micros();
+
+    // Capture start time (falling edge detection)
+    if (!esperandoFin && estadoAntInicio == HIGH && estadoInicio == LOW) {
+      tInicio = ahora;
+      esperandoFin = true;
+      Serial.print("INICIO: ");
+      Serial.print(tInicio);
+      Serial.println(" us");
+    }
+
+    // Capture end time (falling edge detection)
+    if (esperandoFin && estadoAntFin == HIGH && estadoFin == LOW) {
+      tFin = ahora;
+      uint32_t delta = tFin - tInicio;
+      esperandoFin = false;
+
+      Serial.print("FIN: ");
+      Serial.print(tFin);
+      Serial.println(" us");
+
+      Serial.print("DELTA = ");
+      Serial.print(delta);
+      Serial.println(" us");
+    }
+
+    // Update previous states
+    estadoAntInicio = estadoInicio;
+    estadoAntFin    = estadoFin;
+
+    vTaskDelay(1); // 1 ms sampling interval
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_INICIO, INPUT_PULLUP);
+  pinMode(PIN_FIN, INPUT_PULLUP);
+
+  xTaskCreatePinnedToCore(
+    tareaPolling,
+    "PollingDelta",
+    2048,
+    NULL,
+    2,
+    NULL,
+    1
+  );
+}
+
+void loop() {
+  // Not used - FreeRTOS task handles everything
+}
+```
+
+### Interrupt-Based Implementation
+
+For applications requiring maximum timing precision, an interrupt-driven approach can be used:
+
+```cpp
+#include <Arduino.h>
+
+#define PIN_INICIO 18
+#define PIN_FIN    26
+
+volatile bool esperandoInicio = true;
+volatile bool esperandoFin = false;
+volatile bool datoListo = false;
+
+volatile uint32_t tInicio = 0;
+volatile uint32_t tFin = 0;
+volatile uint32_t delta = 0;
+
+portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+
+// ISR for start gate
+void IRAM_ATTR isrInicio() {
+  portENTER_CRITICAL_ISR(&mux);
+
+  if (esperandoInicio) {
+    tInicio = micros();
+    esperandoInicio = false;
+    esperandoFin = true;
+  }
+
+  portEXIT_CRITICAL_ISR(&mux);
+}
+
+// ISR for end gate
+void IRAM_ATTR isrFin() {
+  portENTER_CRITICAL_ISR(&mux);
+
+  if (esperandoFin) {
+    tFin = micros();
+    delta = tFin - tInicio;
+    esperandoFin = false;
+    esperandoInicio = true;
+    datoListo = true;
+  }
+
+  portEXIT_CRITICAL_ISR(&mux);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_INICIO, INPUT_PULLUP);
+  pinMode(PIN_FIN, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(PIN_INICIO), isrInicio, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FIN), isrFin, FALLING);
+
+  Serial.println("Sistema listo: interrupciones + micros()");
+  Serial.println("Esperando INICIO...");
+}
+
+void loop() {
+  if (datoListo) {
+    portENTER_CRITICAL(&mux);
+
+    uint32_t ti = tInicio;
+    uint32_t tf = tFin;
+    uint32_t d  = delta;
+    datoListo = false;
+
+    portEXIT_CRITICAL(&mux);
+
+    Serial.print("INICIO: ");
+    Serial.print(ti);
+    Serial.println(" us");
+
+    Serial.print("FIN: ");
+    Serial.print(tf);
+    Serial.println(" us");
+
+    Serial.print("DELTA = ");
+    Serial.print(d);
+    Serial.println(" us");
+
+    Serial.println("----------------------");
+  }
+}
+```
+
+## Timing Measurement Approach
+
+### Microsecond Precision
+
+The system achieves microsecond precision using the ESP32's `micros()` function, which returns the number of microseconds since the ESP32 began running. This provides:
+
+- **Resolution**: 1 microsecond
+- **Accuracy**: ±1-2 microseconds (limited by crystal oscillator accuracy)
+- **Measurement Range**: 0 to 4,294,967,295 microseconds (~71.6 minutes before overflow)
+
+### Edge Detection Methods
+
+1. **Polling Method**: 
+   - Samples sensor states every 1ms using FreeRTOS task delay
+   - Detects falling edge by comparing current vs. previous state
+   - Timestamp captured immediately when edge detected
+   - Suitable for most free fall experiments
+
+2. **Interrupt Method**:
+   - Hardware interrupt triggered on FALLING edge
+   - Minimal latency (~1-2 microseconds)
+   - Critical section protection for thread-safe variable access
+   - Recommended for high-precision measurements
+
+### State Machine Logic
+
+The firmware implements a simple state machine:
+
+1. **Waiting for Start**: System monitors start gate sensor
+2. **Start Detected**: Records timestamp, transitions to waiting for end
+3. **Waiting for End**: System monitors end gate sensor (start gate ignored)
+4. **End Detected**: Records timestamp, calculates delta, returns to waiting for start
+
+This design prevents false triggers and ensures clean measurement cycles.
+
+## Assembly and Testing
+
+### Assembly Steps
+
+1. **Mount IR Sensors**: Position sensors vertically with adjustable height mechanism
+2. **Wire Power**: Connect 5V and GND to both sensors
+3. **Connect Signals**: Wire sensor outputs to ESP32 GPIO pins
+4. **Add Pull-ups**: If sensors don't have built-in pull-ups, add 10kΩ resistors
+5. **Upload Firmware**: Flash the appropriate firmware to ESP32
+6. **Test Alignment**: Verify IR beams are properly aligned
+
+### Testing Procedure
+
+1. **Power On**: Apply 5V power to circuit
+2. **Open Serial Monitor**: Set baud rate to 115200
+3. **Verify Sensors**: Check that sensors output HIGH when beam is clear
+4. **Test Start Gate**: Break start beam, verify "INICIO" message
+5. **Test End Gate**: Break end beam, verify "FIN" and "DELTA" messages
+6. **Calibration**: Drop object of known mass, verify timing matches theoretical calculation
+
+### Expected Performance
+
+For a typical free fall experiment with 1 meter separation:
+- **Expected Time**: ~452ms (theoretical free fall)
+- **Measurement Accuracy**: ±2ms (depends on sensor response time)
+- **Repeatability**: ±1ms (with proper alignment)
+
+## Applications
+
+- **Physics Education**: Measure gravitational acceleration (g)
+- **Free Fall Experiments**: Verify kinematic equations
+- **Velocity Measurements**: Calculate instantaneous velocity
+- **Timing Gate**: General-purpose timing for moving objects
+- **Photogate Timer**: Scientific data collection
+
+## Troubleshooting
+
+| Issue | Possible Cause | Solution |
+|-------|----------------|----------|
+| No start detection | IR beam misaligned | Adjust sensor alignment |
+| Inconsistent readings | Ambient light interference | Add shielding or use modulated IR |
+| No serial output | Baud rate mismatch | Verify 115200 baud |
+| Always reads LOW | Sensor wired backwards | Check sensor polarity |
+| Overflow errors | Timing > 71 minutes | Reset ESP32 periodically |
+
+## Source Code Location
+
+The complete firmware implementations can be found in:
+- `source/FreeFall/Micro-procesador/FreeFallEpsfreeRTOSFunciona/FreeFallEpsfreeRTOSFunciona.ino` (Polling method)
+- `source/FreeFall/Micro-procesador/FreeFallInt_Timer/FreeFallInt_Timer.ino` (Interrupt method)

@@ -1,0 +1,531 @@
+---
+title: Microcontroller Setup
+description: Configure ESP32 and Arduino for data acquisition in physics experiments
+---
+
+PhysisLab uses microcontrollers (ESP32, Arduino) for precise timing measurements, sensor data acquisition, and signal generation. This guide covers hardware setup, firmware flashing, and serial communication.
+
+## Supported Boards
+
+<CardGroup cols={2}>
+  <Card title="ESP32" icon="microchip">
+    **Best for:**
+    - Dual-core processing (FreeRTOS)
+    - Built-in WiFi/Bluetooth
+    - Dual DAC for signal generation
+    - High-speed interrupts
+    
+    Used in: Free fall timing, oscilloscope/signal generator
+  </Card>
+  
+  <Card title="Arduino (Uno/Nano)" icon="microchip">
+    **Best for:**
+    - Simple timing experiments
+    - Multiple external interrupts
+    - Timer-based measurements
+    - Low power consumption
+    
+    Used in: Multi-sensor free fall detection
+  </Card>
+</CardGroup>
+
+## Arduino IDE Setup
+
+### Installing the Arduino IDE
+
+<Steps>
+  <Step title="Download Arduino IDE">
+    Get the latest version from [arduino.cc/downloads](https://www.arduino.cc/en/software)
+    
+    Recommended version: **2.3.0 or newer** for better ESP32 support
+  </Step>
+  
+  <Step title="Install Board Support">
+    For **ESP32**:
+    
+    1. Open **File → Preferences**
+    2. Add to "Additional Board Manager URLs":
+    ```
+    https://raw.githubusercontent.com/espressif/arduino-esp32/gh-pages/package_esp32_index.json
+    ```
+    3. Go to **Tools → Board → Boards Manager**
+    4. Search "esp32" and install **esp32 by Espressif Systems**
+  </Step>
+  
+  <Step title="Select Your Board">
+    **For ESP32:**
+    - Tools → Board → ESP32 Arduino → ESP32 Dev Module
+    
+    **For Arduino Uno:**
+    - Tools → Board → Arduino AVR Boards → Arduino Uno
+  </Step>
+  
+  <Step title="Select Serial Port">
+    - Tools → Port → [Select your device]
+    - On Linux: `/dev/ttyUSB0` or `/dev/ttyACM0`
+    - On Windows: `COM3`, `COM4`, etc.
+    - On macOS: `/dev/cu.usbserial-*`
+  </Step>
+</Steps>
+
+<Note>
+If your ESP32 is not detected, you may need to install **CP210x or CH340 USB drivers** depending on your board variant.
+</Note>
+
+## Free Fall Timing with ESP32
+
+### Hardware Setup
+
+Connect infrared photogate sensors to detect object passage:
+
+```
+Photogate 1 (Start)  →  GPIO 18
+Photogate 2 (End)    →  GPIO 5
+GND                  →  GND
+```
+
+### FreeRTOS Polling Code
+
+Using FreeRTOS tasks for reliable microsecond timing:
+
+```cpp FreeFallEpsfreeRTOSFunciona.ino
+#include <Arduino.h>
+
+#define PIN_INICIO 18
+#define PIN_FIN    5
+
+void tareaPolling(void *param) {
+  uint8_t estadoAntInicio = HIGH;
+  uint8_t estadoAntFin    = HIGH;
+
+  uint32_t tInicio = 0;
+  uint32_t tFin    = 0;
+
+  bool esperandoFin = false;
+
+  while (true) {
+    uint8_t estadoInicio = digitalRead(PIN_INICIO);
+    uint8_t estadoFin    = digitalRead(PIN_FIN);
+    uint32_t ahora = micros();
+
+    // Detect falling edge on start photogate
+    if (!esperandoFin && estadoAntInicio == HIGH && estadoInicio == LOW) {
+      tInicio = ahora;
+      esperandoFin = true;
+      Serial.print("INICIO: ");
+      Serial.println(tInicio);
+    }
+
+    // Detect falling edge on end photogate
+    if (esperandoFin && estadoAntFin == HIGH && estadoFin == LOW) {
+      tFin = ahora;
+      uint32_t delta = tFin - tInicio;
+      esperandoFin = false;
+
+      Serial.print("DELTA = ");
+      Serial.print(delta);
+      Serial.println(" us");
+    }
+
+    estadoAntInicio = estadoInicio;
+    estadoAntFin    = estadoFin;
+
+    vTaskDelay(1);  // 1 ms sampling, sufficient for photogates
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_INICIO, INPUT_PULLUP);
+  pinMode(PIN_FIN, INPUT_PULLUP);
+
+  // Create FreeRTOS task on core 1
+  xTaskCreatePinnedToCore(
+    tareaPolling,
+    "PollingDelta",
+    2048,    // Stack size
+    NULL,
+    2,       // Priority
+    NULL,
+    1        // Core 1
+  );
+}
+
+void loop() {
+  // Not used - FreeRTOS handles everything
+}
+```
+
+<Tip>
+Use **FreeRTOS tasks** on ESP32 for better timing precision. The dual-core architecture allows one core to handle timing while the other manages serial communication.
+</Tip>
+
+## Multi-Sensor Arduino Setup
+
+### Hardware Connections
+
+For three-photogate free fall experiment:
+
+```
+Photogate 1 (Start)       →  Pin 2  (INT0)
+Photogate 2 (Intermediate) →  Pin 3  (INT1)
+Photogate 3 (Final)       →  Pin 4  (PCINT20)
+```
+
+### Interrupt-Based Timing
+
+```cpp freeFall3Sensores.ino
+#include <Arduino.h>
+
+#define PIN_INICIO      2   // INT0
+#define PIN_INTERMEDIO  3   // INT1
+#define PIN_FINAL       4   // PCINT20
+
+volatile unsigned long contadorMs = 0;
+volatile unsigned long tInicio = 0;
+volatile unsigned long tIntermedio = 0;
+volatile unsigned long tFinal = 0;
+
+float S1 = 0.68;  // Distance to intermediate (m)
+float S2 = 1.75;  // Distance to final (m)
+
+enum Estado {
+  ESPERANDO_INICIO,
+  ESPERANDO_INTERMEDIO,
+  ESPERANDO_FINAL
+};
+
+volatile Estado estado = ESPERANDO_INICIO;
+volatile bool datoListo = false;
+
+// Timer1 interrupt: 1 ms precision
+ISR(TIMER1_COMPA_vect) {
+  if (estado != ESPERANDO_INICIO) {
+    contadorMs++;
+  }
+}
+
+// Photogate 1: Start
+void isrInicio() {
+  if (estado == ESPERANDO_INICIO) {
+    noInterrupts();
+    contadorMs = 0;
+    tInicio = 0;
+    estado = ESPERANDO_INTERMEDIO;
+    interrupts();
+  }
+}
+
+// Photogate 2: Intermediate
+void isrIntermedio() {
+  if (estado == ESPERANDO_INTERMEDIO) {
+    noInterrupts();
+    tIntermedio = contadorMs;
+    estado = ESPERANDO_FINAL;
+    interrupts();
+  }
+}
+
+// Photogate 3: Final (using Pin Change Interrupt)
+ISR(PCINT2_vect) {
+  if (estado == ESPERANDO_FINAL) {
+    if (digitalRead(PIN_FINAL) == LOW) {
+      noInterrupts();
+      tFinal = contadorMs;
+      estado = ESPERANDO_INICIO;
+      datoListo = true;
+      interrupts();
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(PIN_INICIO, INPUT_PULLUP);
+  pinMode(PIN_INTERMEDIO, INPUT_PULLUP);
+  pinMode(PIN_FINAL, INPUT_PULLUP);
+
+  // Configure Timer1 for 1 ms interrupts
+  noInterrupts();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1  = 0;
+  OCR1A = 250;                   // 16 MHz / 64 / 250 = 1 ms
+  TCCR1B |= (1 << WGM12);        // CTC mode
+  TCCR1B |= (1 << CS11) | (1 << CS10);  // Prescaler 64
+  TIMSK1 |= (1 << OCIE1A);       // Enable interrupt
+  interrupts();
+
+  // External interrupts
+  attachInterrupt(digitalPinToInterrupt(PIN_INICIO), isrInicio, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_INTERMEDIO), isrIntermedio, FALLING);
+
+  // Pin Change Interrupt for PIN_FINAL
+  PCICR  |= (1 << PCIE2);
+  PCMSK2 |= (1 << PCINT20);
+
+  Serial.println("Sistema listo: 3 sensores");
+}
+
+void loop() {
+  if (datoListo) {
+    noInterrupts();
+    unsigned long tm = tIntermedio;
+    unsigned long tf = tFinal;
+    datoListo = false;
+    interrupts();
+
+    Serial.println("------ RESULTADO ------");
+    Serial.print("Tiempo INICIO → INTERMEDIO: ");
+    Serial.print(tm);
+    Serial.println(" ms");
+
+    double g1 = (2*S1)/(tm*tm*0.000001);
+    Serial.print("Gravedad g1: ");
+    Serial.print(g1);
+    Serial.println(" m/s²");
+
+    Serial.print("Tiempo TOTAL: ");
+    Serial.print(tf);
+    Serial.println(" ms");
+
+    double g2 = (2*S2)/(tf*tf*0.000001);
+    Serial.print("Gravedad g2: ");
+    Serial.print(g2);
+    Serial.println(" m/s²");
+  }
+}
+```
+
+<Note>
+Arduino provides **2 external interrupts** (INT0, INT1) and **pin change interrupts** (PCINT) for additional pins. Use external interrupts for critical timing.
+</Note>
+
+## Signal Generator (ESP32 DAC)
+
+### Hardware Setup
+
+ESP32 has two 8-bit DACs for analog output:
+
+```
+DAC1  →  GPIO 25  →  Output 1 (0-3.3V)
+DAC2  →  GPIO 26  →  Output 2 (0-3.3V)
+```
+
+### Dual-Channel Waveform Generator
+
+```cpp GENERADOR_OSCILOSCOPIO.ino
+#include <Arduino.h>
+#include <math.h>
+#include "driver/dac.h"
+
+#define DAC1_PIN 25
+#define DAC2_PIN 26
+#define SAMPLE_RATE 40000
+#define TABLE_SIZE 256
+
+typedef struct {
+  uint8_t dacPin;
+  volatile uint32_t phaseAcc;
+  volatile uint32_t phaseStep;
+  volatile bool enabled;
+  uint8_t waveTableA[TABLE_SIZE];
+  uint8_t waveTableB[TABLE_SIZE];
+  volatile uint8_t* volatile activeWaveTable;
+  hw_timer_t* timer;
+  portMUX_TYPE mux;
+} SignalChannel;
+
+SignalChannel ch1 = { DAC1_PIN, 0, 0, false, {}, {}, nullptr, nullptr, portMUX_INITIALIZER_UNLOCKED };
+SignalChannel ch2 = { DAC2_PIN, 0, 0, false, {}, {}, nullptr, nullptr, portMUX_INITIALIZER_UNLOCKED };
+
+void generateWaveToTable(uint8_t* table, const char* type, float amplitude, float offset) {
+  amplitude = constrain(amplitude, 0, 255);
+  offset    = constrain(offset, 0, 255);
+
+  for (int i = 0; i < TABLE_SIZE; i++) {
+    float val = 0;
+    float angle = (2.0 * PI * i) / TABLE_SIZE;
+
+    if      (strcmp(type, "SINE")     == 0) val = (sin(angle) + 1) * 0.5;
+    else if (strcmp(type, "SQUARE")   == 0) val = (i < TABLE_SIZE/2) ? 1.0 : 0.0;
+    else if (strcmp(type, "TRIANGLE") == 0) val = (i < TABLE_SIZE/2) ? (2.0*i/TABLE_SIZE) : (2.0 - 2.0*i/TABLE_SIZE);
+    else if (strcmp(type, "SAW")      == 0) val = (float)i / TABLE_SIZE;
+
+    table[i] = (uint8_t)constrain((val * amplitude) + offset, 0, 255);
+  }
+}
+
+void updateFrequency(SignalChannel* ch, float freq) {
+  portENTER_CRITICAL(&ch->mux);
+  ch->phaseStep = (uint32_t)((freq * TABLE_SIZE * 65536.0) / SAMPLE_RATE);
+  portEXIT_CRITICAL(&ch->mux);
+}
+
+void IRAM_ATTR onTimerCh1() {
+  if (!ch1.enabled) return;
+  ch1.phaseAcc += ch1.phaseStep;
+  uint8_t idx = ch1.phaseAcc >> 16;
+  dac_output_voltage(DAC_CHANNEL_1, ch1.activeWaveTable[idx]);
+}
+
+void IRAM_ATTR onTimerCh2() {
+  if (!ch2.enabled) return;
+  ch2.phaseAcc += ch2.phaseStep;
+  uint8_t idx = ch2.phaseAcc >> 16;
+  dac_output_voltage(DAC_CHANNEL_2, ch2.activeWaveTable[idx]);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  generateWaveToTable(ch1.waveTableA, "SINE", 255, 0);
+  ch1.activeWaveTable = ch1.waveTableA;
+  ch1.timer = timerBegin(0, 80, true);  // 1 MHz timer
+  timerAttachInterrupt(ch1.timer, onTimerCh1, true);
+  timerAlarmWrite(ch1.timer, 1000000 / SAMPLE_RATE, true);
+  timerAlarmEnable(ch1.timer);
+
+  generateWaveToTable(ch2.waveTableA, "SINE", 255, 0);
+  ch2.activeWaveTable = ch2.waveTableA;
+  ch2.timer = timerBegin(2, 80, true);
+  timerAttachInterrupt(ch2.timer, onTimerCh2, true);
+  timerAlarmWrite(ch2.timer, 1000000 / SAMPLE_RATE, true);
+  timerAlarmEnable(ch2.timer);
+
+  dac_output_enable(DAC_CHANNEL_1);
+  dac_output_enable(DAC_CHANNEL_2);
+
+  Serial.println("Generador listo");
+}
+
+void loop() {
+  // Handle serial commands: CH1 SINE 1000 1 255 128
+  // Format: CH[1|2] [SINE|SQUARE|TRIANGLE|SAW] [freq] [enable] [amplitude] [offset]
+}
+```
+
+## Serial Communication
+
+### Reading Data in Python
+
+```python procesar.py
+import serial
+import time
+
+# Open serial port
+ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+time.sleep(2)  # Wait for Arduino reset
+
+print("Listening for data...")
+
+with open("mediciones.txt", "w") as f:
+    f.write("timestamp,delta_t\n")
+    
+    while True:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode('utf-8').strip()
+            print(line)
+            
+            # Parse: "DELTA = 405123 us"
+            if "DELTA" in line:
+                delta_us = int(line.split("=")[1].split()[0])
+                delta_s = delta_us / 1e6
+                
+                timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                f.write(f"{timestamp},{delta_s}\n")
+                f.flush()
+```
+
+### Sending Commands
+
+```python
+import serial
+
+ser = serial.Serial('/dev/ttyUSB0', 115200)
+time.sleep(2)
+
+# Set channel 1 to 1 kHz sine wave
+ser.write(b"CH1 SINE 1000 1 255 128\n")
+
+# Read response
+response = ser.readline().decode('utf-8').strip()
+print(response)  # "OK"
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Board not detected">
+    1. Check USB cable (must support data, not just power)
+    2. Install CP210x or CH340 drivers
+    3. On Linux, add user to dialout group: `sudo usermod -a -G dialout $USER`
+    4. Try different USB port
+  </Accordion>
+  
+  <Accordion title="Upload fails">
+    1. Hold **BOOT** button while uploading (some ESP32 boards)
+    2. Reduce upload speed: Tools → Upload Speed → 115200
+    3. Close Serial Monitor during upload
+    4. Check correct board selected in Tools → Board
+  </Accordion>
+  
+  <Accordion title="Serial Monitor shows gibberish">
+    1. Match baud rate: Serial.begin(115200) ↔ Serial Monitor set to 115200
+    2. Check line ending setting (usually "Newline")
+    3. Try different baud rates: 9600, 115200
+  </Accordion>
+  
+  <Accordion title="Timing is inaccurate">
+    1. Use `micros()` instead of `millis()` for sub-millisecond timing
+    2. Avoid `Serial.print()` in interrupt handlers (use flags instead)
+    3. For Arduino, disable interrupts during critical timing: `noInterrupts()`
+    4. On ESP32, pin FreeRTOS task to dedicated core
+  </Accordion>
+</AccordionGroup>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Timing Precision" icon="clock">
+    - Use hardware interrupts for event detection
+    - Call `micros()` immediately in ISR
+    - Avoid delays or prints in ISR
+    - Use FreeRTOS tasks on ESP32
+  </Card>
+  
+  <Card title="Serial Communication" icon="plug">
+    - Use high baud rate (115200)
+    - Add newline terminators
+    - Flush after critical writes
+    - Buffer data if printing in loop
+  </Card>
+  
+  <Card title="Power Management" icon="battery">
+    - Use USB power for development
+    - External 5V supply for production
+    - Add decoupling capacitors near sensors
+    - Avoid powering sensors from GPIO
+  </Card>
+  
+  <Card title="Code Organization" icon="code">
+    - Keep ISRs short and fast
+    - Use volatile for shared variables
+    - Protect shared data with mutexes/critical sections
+    - Separate concerns: acquisition vs. processing
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Data Analysis" icon="chart-line" href="/guides/data-analysis">
+    Process microcontroller data with NumPy and SciPy
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="/api-reference/data-acquisition">
+    Detailed API for sensor interfaces
+  </Card>
+</CardGroup>

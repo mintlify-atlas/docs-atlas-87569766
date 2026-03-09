@@ -1,97 +1,142 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "Welcome to PhysisLab"
+description: "Low-cost physics laboratory experiments using computer vision, microcontrollers, and signal processing"
 ---
 
-## Setting up
+## Overview
 
-Get your documentation site up and running in minutes.
+PhysisLab is a collection of educational physics experiments designed for low-cost setups using readily available hardware. Measure gravity with a webcam, analyze pendulum motion with computer vision, or build an oscilloscope with an ESP32 microcontroller.
 
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
+<CardGroup cols={2}>
   <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
+    title="Getting Started"
+    icon="rocket"
+    href="/introduction"
   >
-    Edit your docs locally and preview them in real time.
+    Learn about PhysisLab and what you can build
   </Card>
   <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
+    title="Requirements"
+    icon="list-check"
+    href="/requirements"
   >
-    Customize the design and colors of your site to match your brand.
-  </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+    Hardware and software needed for experiments
   </Card>
   <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
+    title="Installation"
+    icon="download"
+    href="/installation"
   >
-    Auto-generate API documentation from OpenAPI specifications.
-  </Card>
-</Columns>
-
-## Create beautiful pages
-
-Everything you need to create world-class documentation.
-
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
+    Set up Python environment and dependencies
   </Card>
   <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
+    title="View on GitHub"
+    icon="github"
+    href="https://github.com/Camibros314/PhysisLabGitcode"
   >
-    Add sample code to demonstrate how to use your product.
+    Explore the source code and examples
+  </Card>
+</CardGroup>
+
+## Experiments
+
+Choose from six different physics experiments, each with multiple measurement methods.
+
+<CardGroup cols={3}>
+  <Card
+    title="Free Fall"
+    icon="arrow-down"
+    href="/experiments/freefall"
+  >
+    Measure gravitational acceleration using camera, audio, or sensors
   </Card>
   <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
+    title="Pendulum"
+    icon="circle-half-stroke"
+    href="/experiments/pendulum"
   >
-    Display images and other media.
+    Analyze pendulum motion and calculate period with computer vision
   </Card>
   <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
+    title="Spring-Mass System"
+    icon="wave-sine"
+    href="/experiments/spring-mass"
   >
-    Write once and reuse across your docs.
+    Track oscillatory motion and determine spring constants
   </Card>
-</Columns>
+  <Card
+    title="Projectile Motion"
+    icon="baseball"
+    href="/experiments/projectile-motion"
+  >
+    Analyze parabolic trajectories with video tracking
+  </Card>
+  <Card
+    title="Kinematics"
+    icon="gauge-high"
+    href="/experiments/kinematics"
+  >
+    Measure velocity and acceleration with distance sensors
+  </Card>
+  <Card
+    title="All Experiments"
+    icon="flask"
+    href="/experiments/overview"
+  >
+    Browse all available experiments
+  </Card>
+</CardGroup>
 
-## Need inspiration?
+## Instruments
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+Build your own lab instruments with ESP32 microcontrollers.
+
+<CardGroup cols={2}>
+  <Card
+    title="Oscilloscope"
+    icon="wave-square"
+    href="/instruments/oscilloscope"
+  >
+    Real-time signal visualization with PyQt5 GUI
+  </Card>
+  <Card
+    title="Signal Generator"
+    icon="signal"
+    href="/instruments/signal-generator"
+  >
+    Generate sine, square, triangle, and sawtooth waveforms
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card
+    title="Computer Vision Tracking"
+    icon="camera"
+    href="/guides/camera-tracking"
+  >
+    OpenCV-based motion tracking with color detection
+  </Card>
+  <Card
+    title="ESP32 Integration"
+    icon="microchip"
+    href="/hardware/esp32"
+  >
+    Real-time data acquisition with microcontrollers
+  </Card>
+  <Card
+    title="Data Analysis"
+    icon="chart-line"
+    href="/guides/data-analysis"
+  >
+    NumPy and SciPy for automated experiment analysis
+  </Card>
+  <Card
+    title="Low-Cost Setup"
+    icon="dollar-sign"
+    href="/requirements"
+  >
+    Affordable components for educational environments
+  </Card>
+</CardGroup>

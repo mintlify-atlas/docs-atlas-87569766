@@ -1,122 +1,108 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "PhysisLab",
+  "theme": "palm",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#2E86C1",
+    "light": "#5DADE2",
+    "dark": "#1B4F72"
   },
-  "favicon": "/favicon.svg",
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/Camibros314/PhysisLabGitcode"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/Camibros314/PhysisLabGitcode"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Documentation",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Getting Started",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "requirements",
+              "installation"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Experiments",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
+              "experiments/overview",
+              "experiments/freefall",
+              "experiments/pendulum",
+              "experiments/spring-mass",
+              "experiments/projectile-motion",
+              "experiments/kinematics"
             ]
           },
           {
-            "group": "Writing content",
+            "group": "Instruments",
             "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
+              "instruments/overview",
+              "instruments/oscilloscope",
+              "instruments/signal-generator"
             ]
           },
           {
-            "group": "AI tools",
+            "group": "Guides",
             "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "guides/camera-tracking",
+              "guides/color-detection",
+              "guides/microcontroller-setup",
+              "guides/data-analysis"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Hardware",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Components",
             "pages": [
-              "api-reference/introduction"
+              "hardware/esp32",
+              "hardware/sensors",
+              "hardware/cameras"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Circuits",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "hardware/circuits/freefall-detector",
+              "hardware/circuits/oscilloscope",
+              "hardware/circuits/signal-generator"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Python Scripts",
+            "pages": [
+              "api/tracking-functions",
+              "api/analysis-functions",
+              "api/gui-components"
+            ]
+          },
+          {
+            "group": "Arduino Firmware",
+            "pages": [
+              "api/arduino/freefall",
+              "api/arduino/oscilloscope",
+              "api/arduino/signal-generator"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

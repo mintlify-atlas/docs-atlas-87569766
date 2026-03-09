@@ -1,0 +1,417 @@
+---
+title: HSV Color Detection
+description: Master color-based object detection for reliable experiment tracking
+---
+
+Color detection is the foundation of PhysisLab's camera tracking system. This guide teaches you how to select, calibrate, and fine-tune HSV color ranges for robust object detection under varying lighting conditions.
+
+## Why HSV Color Space?
+
+HSV (Hue, Saturation, Value) separates color information from brightness, making it superior to RGB for color-based tracking:
+
+- **Hue** (0-179): The actual color (red, green, blue, etc.)
+- **Saturation** (0-255): Color intensity (vivid vs. pale)
+- **Value** (0-255): Brightness (light vs. dark)
+
+<Note>
+OpenCV uses **H: 0-179** (not 0-360) to fit in 8 bits. When converting from other tools, divide Hue by 2.
+</Note>
+
+## Basic Color Calibration
+
+### Method 1: ROI-Based Auto-Calibration
+
+The simplest approach is to select a region of the object and calculate mean HSV values:
+
+```python FreeFallCam.py
+import cv2
+import numpy as np
+
+# Capture reference frame
+ret, frame = cap.read()
+
+# Select ROI around the object
+roi = cv2.selectROI("Selecciona region del objeto", frame, False, False)
+x, y, w, h = roi
+
+# Extract and convert to HSV
+selected_region = frame[y:y+h, x:x+w]
+hsv_region = cv2.cvtColor(selected_region, cv2.COLOR_BGR2HSV)
+
+# Calculate mean HSV
+mean_hsv = np.mean(hsv_region.reshape(-1, 3), axis=0).astype(int)
+print(f"HSV promedio: H={mean_hsv[0]}, S={mean_hsv[1]}, V={mean_hsv[2]}")
+```
+
+### Setting Tolerance Values
+
+<CodeGroup>
+```python Fixed Tolerance
+# Simple approach with fixed tolerance
+tolerance = np.array([25, 85, 85])  # [H, S, V]
+
+lower_color = np.clip(mean_hsv - tolerance, 0, 255)
+upper_color = np.clip(mean_hsv + tolerance, 0, 255)
+
+# Note: H is 0-179, so upper bound should be 179
+lower_color[0] = max(0, mean_hsv[0] - tolerance[0])
+upper_color[0] = min(179, mean_hsv[0] + tolerance[0])
+```
+
+```python Adaptive Tolerance
+# Better approach with adaptive margins
+h_mean, s_mean, v_mean = mean_hsv
+
+margen_h = 15
+margen_s = max(40, s_mean * 0.4)  # At least 40, or 40% of mean
+margen_v = max(40, v_mean * 0.4)
+
+lower_color = np.array([
+    max(0, h_mean - margen_h),
+    max(0, s_mean - margen_s),
+    max(0, v_mean - margen_v)
+])
+
+upper_color = np.array([
+    min(179, h_mean + margen_h),
+    min(255, s_mean + margen_s),
+    min(255, v_mean + margen_v)
+])
+```
+</CodeGroup>
+
+## Advanced Calibration Techniques
+
+### Handling Low Saturation Objects
+
+For pale or white objects (low saturation), widen the saturation range:
+
+```python analisis.py (pendulum)
+h_bob = np.mean(hsv_bob[:, :, 0])
+s_bob = np.mean(hsv_bob[:, :, 1])
+v_bob = np.mean(hsv_bob[:, :, 2])
+
+margen_h = 15
+margen_s = max(40, s_bob * 0.4)  # Wider range for low saturation
+margen_v = max(40, v_bob * 0.4)
+
+hsv_bob_lower = np.array([
+    max(0, h_bob - margen_h),
+    max(0, s_bob - margen_s),
+    max(0, v_bob - margen_v)
+])
+
+hsv_bob_upper = np.array([
+    min(179, h_bob + margen_h),
+    min(255, s_bob + margen_s),
+    min(255, v_bob + margen_v)
+])
+```
+
+### Calibrating Multiple Objects
+
+For experiments with multiple tracked objects, calibrate each separately:
+
+```python analisis.py (pendulum)
+# Calibrate pendulum bob
+print("Selecciona ROI del CUERPO del péndulo (bob)")
+roi_bob = cv2.selectROI("Seleccionar BOB", frame_ref, False)
+xb, yb, wb, hb = roi_bob
+objeto_bob = frame_ref[yb:yb+hb, xb:xb+wb]
+hsv_bob = cv2.cvtColor(objeto_bob, cv2.COLOR_BGR2HSV)
+# ... calculate bob color range ...
+
+# Calibrate pivot/axis
+print("Selecciona ROI del EJE/PIVOTE del péndulo")
+roi_eje = cv2.selectROI("Seleccionar EJE", frame_ref, False)
+xe, ye, we, he = roi_eje
+objeto_eje = frame_ref[ye:ye+he, xe:xe+we]
+hsv_eje = cv2.cvtColor(objeto_eje, cv2.COLOR_BGR2HSV)
+# ... calculate pivot color range ...
+```
+
+## Applying Color Masks
+
+### Basic Masking
+
+Once you have color ranges, apply the mask to each frame:
+
+```python FreeFallCam.py
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    # Convert to HSV
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    
+    # Apply color threshold
+    mask = cv2.inRange(hsv, lower_color, upper_color)
+    
+    # Show mask for debugging
+    cv2.imshow("Mask", mask)
+    cv2.imshow("Frame", frame)
+    
+    if cv2.waitKey(1) & 0xFF == 27:
+        break
+```
+
+### Morphological Operations
+
+<Steps>
+  <Step title="Opening: Remove Noise">
+    Morphological opening removes small isolated pixels:
+    
+    ```python FreeFallCam.py
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    ```
+    
+    This is **erosion** followed by **dilation** - it removes small white noise.
+  </Step>
+  
+  <Step title="Dilation: Fill Gaps">
+    Dilation fills small holes inside the detected object:
+    
+    ```python FreeFallCam.py
+    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+    ```
+  </Step>
+  
+  <Step title="Closing: Connect Regions (Optional)">
+    For fragmented detections, closing can help:
+    
+    ```python
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    ```
+    
+    This is **dilation** followed by **erosion**.
+  </Step>
+</Steps>
+
+## Visualizing HSV Values
+
+### Interactive Color Picker
+
+Create a tool to click on the object and see HSV values:
+
+```python
+import cv2
+import numpy as np
+
+def click_color(event, x, y, flags, param):
+    if event == cv2.EVENT_LBUTTONDOWN:
+        frame, hsv = param
+        h, s, v = hsv[y, x]
+        bgr = frame[y, x]
+        print(f"Pixel ({x},{y}): HSV=({h},{s},{v})  BGR=({bgr[0]},{bgr[1]},{bgr[2]})")
+
+cap = cv2.VideoCapture(0)
+ret, frame = cap.read()
+hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+cv2.namedWindow("Frame")
+cv2.setMouseCallback("Frame", click_color, (frame, hsv))
+
+cv2.imshow("Frame", frame)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+```
+
+### Histogram Analysis
+
+Visualize the distribution of HSV values in your ROI:
+
+```python
+import matplotlib.pyplot as plt
+
+# After selecting ROI
+hsv_region = cv2.cvtColor(selected_region, cv2.COLOR_BGR2HSV)
+
+fig, axs = plt.subplots(1, 3, figsize=(12, 4))
+
+for i, (channel, name) in enumerate([(0, 'Hue'), (1, 'Saturation'), (2, 'Value')]):
+    axs[i].hist(hsv_region[:,:,channel].ravel(), bins=50, color=['r','g','b'][i])
+    axs[i].set_title(name)
+    axs[i].set_xlabel('Value')
+    axs[i].set_ylabel('Frequency')
+
+plt.tight_layout()
+plt.show()
+```
+
+## Color Selection Tips
+
+<CardGroup cols={2}>
+  <Card title="Red Objects" icon="circle" color="#ff0000">
+    **Hue wraps around at 180!** Use two masks:
+    - Lower red: H=0-10
+    - Upper red: H=170-179
+    
+    ```python
+    mask1 = cv2.inRange(hsv, (0,100,100), (10,255,255))
+    mask2 = cv2.inRange(hsv, (170,100,100), (179,255,255))
+    mask = cv2.bitwise_or(mask1, mask2)
+    ```
+  </Card>
+  
+  <Card title="Yellow/Orange" icon="circle" color="#ffa500">
+    **H: 15-35**
+    
+    Good for high-visibility objects. Wide saturation range recommended.
+  </Card>
+  
+  <Card title="Green" icon="circle" color="#00ff00">
+    **H: 40-80**
+    
+    Avoid if background is green (grass, walls). Use blue or yellow instead.
+  </Card>
+  
+  <Card title="Blue" icon="circle" color="#0000ff">
+    **H: 90-130**
+    
+    Excellent for indoor experiments with neutral backgrounds.
+  </Card>
+</CardGroup>
+
+## Troubleshooting Color Detection
+
+### Problem: Object Not Detected
+
+<AccordionGroup>
+  <Accordion title="Check HSV ranges">
+    Print actual HSV values and compare with your thresholds:
+    
+    ```python
+    print(f"Lower: {lower_color}")
+    print(f"Upper: {upper_color}")
+    print(f"Mean:  {mean_hsv}")
+    ```
+  </Accordion>
+  
+  <Accordion title="Visualize the mask">
+    Always display the binary mask to see what's being detected:
+    
+    ```python
+    cv2.imshow("Mask", mask)
+    ```
+  </Accordion>
+  
+  <Accordion title="Increase tolerance">
+    If the mask is empty, widen your ranges:
+    
+    ```python
+    tolerance = np.array([30, 100, 100])  # Wider
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Problem: Too Many False Detections
+
+<Steps>
+  <Step title="Narrow HSV Range">
+    Reduce tolerance, especially for Hue:
+    
+    ```python
+    margen_h = 10  # Instead of 15
+    ```
+  </Step>
+  
+  <Step title="Increase Morphological Kernel">
+    Larger opening removes bigger noise:
+    
+    ```python
+    kernel = np.ones((7,7), np.uint8)  # Instead of 5x5
+    ```
+  </Step>
+  
+  <Step title="Filter by Area">
+    Reject contours that are too small or too large:
+    
+    ```python
+    if cv2.contourArea(c) > 300 and cv2.contourArea(c) < 5000:
+        # Process contour
+    ```
+  </Step>
+</Steps>
+
+### Problem: Detection Lost During Motion
+
+<Tip>
+**Shadows and reflections** change the object's apparent color. Solutions:
+
+1. Use **diffuse lighting** (softbox or bounced light)
+2. Increase **Value tolerance** to handle brightness changes
+3. Coat object with **matte paint** to reduce reflections
+4. Use **multiple color channels** and combine masks
+</Tip>
+
+## Lighting Best Practices
+
+### Recommended Setup
+
+```
+┌─────────────┐
+│  Diffuser   │  ← Softbox or white sheet
+│   Light     │
+└──────┬──────┘
+       ↓
+   [Object]  ← Your tracked object
+       ↓
+    Camera
+```
+
+<CardGroup cols={2}>
+  <Card title="Do" icon="check">
+    - Use indirect/diffuse lighting
+    - Keep lighting consistent during experiment
+    - Use high-contrast backgrounds
+    - Test calibration before recording
+  </Card>
+  
+  <Card title="Don't" icon="xmark">
+    - Use direct sunlight (changes intensity)
+    - Mix different light sources (color temperature)
+    - Rely on auto white balance
+    - Ignore shadows on the object
+  </Card>
+</CardGroup>
+
+## Real-World Examples
+
+### Free Fall Experiment
+
+```python FreeFallCam.py
+# Bright yellow ball against dark background
+tolerance = np.array([25, 85, 85])
+# Typical HSV: (25, 200, 220) - Yellow/Orange
+```
+
+### Pendulum Tracking
+
+```python analisis.py (pendulum)
+# Red bob + gray pivot - two separate calibrations
+margen_h = 15
+margen_s = max(40, s_bob * 0.4)  # Adaptive for varying saturation
+margen_v = max(40, v_bob * 0.4)
+```
+
+### Mass-Spring System
+
+```python analisis.py (masa-resorte)
+# Three green markers for reference triangle
+kernel_sz = 7  # Larger kernel for far-away markers
+n_esperados = 3  # Detect exactly 3 markers
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Camera Tracking" icon="video" href="/guides/camera-tracking">
+    Apply color detection in motion tracking pipelines
+  </Card>
+  
+  <Card title="Data Analysis" icon="chart-line" href="/guides/data-analysis">
+    Process tracking data to extract physics measurements
+  </Card>
+</CardGroup>

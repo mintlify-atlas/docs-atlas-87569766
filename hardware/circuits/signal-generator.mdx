@@ -1,0 +1,502 @@
+---
+title: Signal Generator Circuit
+description: ESP32 DAC-based dual-channel arbitrary waveform generator
+---
+
+## Overview
+
+The PhysisLab Signal Generator is a dual-channel arbitrary waveform generator built around the ESP32's internal 8-bit DACs (Digital-to-Analog Converters). Using Direct Digital Synthesis (DDS) with lookup tables, it can generate sine, square, triangle, sawtooth, and DC waveforms at frequencies from DC to several kilohertz.
+
+## Circuit Design
+
+### Component List
+
+- **Microcontroller**: ESP32 development board
+- **DAC Outputs**: 2x built-in 8-bit DAC (GPIO 25, GPIO 26)
+- **Output Buffer** (optional): 
+  - Op-amp (e.g., TL072, LM358) for buffering/amplification
+  - Resistors for gain setting
+  - Capacitors for AC coupling (if needed)
+- **Power Supply**: 5V USB or regulated supply
+- **Connectors**: BNC connectors or terminal blocks for outputs
+
+### Pin Assignments
+
+| Function | GPIO Pin | DAC Channel | Output Range |
+|----------|----------|-------------|---------------|
+| Channel 1 Output | GPIO 25 | DAC_CHANNEL_1 | 0 - 3.3V (unbuffered) |
+| Channel 2 Output | GPIO 26 | DAC_CHANNEL_2 | 0 - 3.3V (unbuffered) |
+
+### Circuit Connections
+
+#### Basic Configuration (No Buffering)
+
+```
+ESP32 DAC1 (GPIO 25)
+       │
+       ├─────────→ Channel 1 Output (0-3.3V)
+       │
+      ═╪═ 10μF (DC blocking, optional)
+       │
+
+ESP32 DAC2 (GPIO 26)
+       │
+       ├─────────→ Channel 2 Output (0-3.3V)
+       │
+      ═╪═ 10μF (DC blocking, optional)
+       │
+
+ESP32 Power:
+├── VIN → 5V USB
+├── GND → Common ground
+└── 3.3V → DAC reference voltage
+```
+
+#### Buffered Configuration with Op-Amp
+
+For higher output current and adjustable amplitude:
+
+```
+GPIO 25 (DAC1)
+       │
+      ┌┴┐ R1 = 10kΩ
+      └┬┘
+       │
+       ├─────→ Op-Amp (+) Input
+       │
+      ┌┴┐ R2 = 10kΩ (to GND for unity gain)
+      └┬┘
+       │
+      GND
+
+Op-Amp Output ──┬── R_feedback ─┐
+                │                 │
+                └←───────────── Op-Amp (-) Input
+                │
+                └─────→ Buffered Output
+                │
+               ═╪═ 100μF (if AC coupling needed)
+                │
+```
+
+**Unity Gain Buffer**:
+- Provides low output impedance (less than 1Ω)
+- Can source/sink more current (up to 20mA for LM358)
+- Maintains 0-3.3V output range
+
+**Inverting Amplifier** (for bipolar output):
+```
+DC Offset: 1.65V (half of 3.3V)
+Gain: -1
+Output Range: -1.65V to +1.65V (centered at 0V)
+```
+
+## Electrical Specifications
+
+### DAC Specifications
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Resolution | 8 bits | 0-255 digital input |
+| DAC Channels | 2 (GPIO 25, 26) | Independent operation |
+| Output Voltage Range | 0V - 3.3V | Typical, unbuffered |
+| Output Impedance | ~2 kΩ | High impedance, buffer recommended |
+| Maximum Output Current | ~1 mA | Very limited, requires buffer for loads |
+| Settling Time | ~1 μs | Typical for step changes |
+| DNL (Differential Non-linearity) | ±0.5 LSB | Typical |
+| INL (Integral Non-linearity) | ±1 LSB | Typical |
+
+### Signal Generation Specifications
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Sample Rate | 40 kHz | Timer-driven DDS update rate |
+| Waveform Resolution | 256 samples | Lookup table size |
+| Frequency Range | 0.01 Hz - 10 kHz | Practical range |
+| Frequency Resolution | 32-bit phase accumulator | Very fine tuning |
+| Amplitude Control | 0 - 255 (0V - 3.3V) | Per-channel setting |
+| DC Offset Control | 0 - 255 (0V - 3.3V) | Per-channel setting |
+| Waveform Types | 5 types | SINE, SQUARE, TRIANGLE, SAW, DC |
+| Phase Noise | Low | Crystal-based timing |
+
+### Power Requirements
+
+- **Operating Voltage**: 5V USB (3.3V regulated internally)
+- **Current Consumption**: ~80-120mA (ESP32 only)
+- **DAC Output Power**: less than 1 mW per channel (unbuffered)
+- **Total System Power**: ~0.4W - 0.6W
+
+## Firmware Implementation
+
+### Complete DDS Signal Generator
+
+This implementation provides independent dual-channel waveform generation:
+
+```cpp
+#include <Arduino.h>
+#include <math.h>
+#include "driver/dac.h"
+
+#define DAC1_PIN 25
+#define DAC2_PIN 26
+
+#define SAMPLE_RATE 40000
+#define TABLE_SIZE 256
+#define TIMER_DIVIDER 80
+#define TIMER_INTERVAL_US (1000000 / SAMPLE_RATE)
+
+// Signal channel structure
+typedef struct {
+  uint8_t dacPin;
+  volatile uint32_t phaseAcc;      // 32-bit phase accumulator
+  volatile uint32_t phaseStep;     // Frequency control
+  volatile bool enabled;           // Channel enable/disable
+  uint8_t waveTableA[TABLE_SIZE];  // Primary waveform table
+  uint8_t waveTableB[TABLE_SIZE];  // Secondary table (double buffering)
+  volatile uint8_t* volatile activeWaveTable;  // Current active table
+  hw_timer_t* timer;               // Dedicated hardware timer
+  portMUX_TYPE mux;                // Critical section mutex
+} SignalChannel;
+
+// Initialize two independent channels
+SignalChannel ch1 = { DAC1_PIN, 0, 0, false, {}, {}, nullptr, nullptr, portMUX_INITIALIZER_UNLOCKED };
+SignalChannel ch2 = { DAC2_PIN, 0, 0, false, {}, {}, nullptr, nullptr, portMUX_INITIALIZER_UNLOCKED };
+
+// Generate waveform into lookup table
+void generateWaveToTable(uint8_t* table, const char* type, float amplitude, float offset) {
+  amplitude = constrain(amplitude, 0, 255);
+  offset    = constrain(offset, 0, 255);
+
+  for (int i = 0; i < TABLE_SIZE; i++) {
+    float val = 0;
+    float angle = (2.0 * PI * i) / TABLE_SIZE;
+
+    if      (strcmp(type, "SINE")     == 0) val = (sin(angle) + 1) * 0.5;
+    else if (strcmp(type, "SQUARE")   == 0) val = (i < TABLE_SIZE/2) ? 1.0 : 0.0;
+    else if (strcmp(type, "TRIANGLE") == 0) val = (i < TABLE_SIZE/2) ? (2.0*i/TABLE_SIZE) : (2.0 - 2.0*i/TABLE_SIZE);
+    else if (strcmp(type, "SAW")      == 0) val = (float)i / TABLE_SIZE;
+    else if (strcmp(type, "DC")       == 0) val = 0;
+
+    table[i] = (uint8_t)constrain((val * amplitude) + offset, 0, 255);
+  }
+}
+
+// Update frequency by setting phase step
+void updateFrequency(SignalChannel* ch, float freq) {
+  portENTER_CRITICAL(&ch->mux);
+  ch->phaseStep = (uint32_t)((freq * TABLE_SIZE * 65536.0) / SAMPLE_RATE);
+  portEXIT_CRITICAL(&ch->mux);
+}
+
+// Timer ISR for Channel 1
+void IRAM_ATTR onTimerCh1() {
+  if (!ch1.enabled) return;
+  ch1.phaseAcc += ch1.phaseStep;
+  uint8_t idx = ch1.phaseAcc >> 16;  // Extract upper 8 bits for table index
+  dac_output_voltage(DAC_CHANNEL_1, ch1.activeWaveTable[idx]);
+}
+
+// Timer ISR for Channel 2
+void IRAM_ATTR onTimerCh2() {
+  if (!ch2.enabled) return;
+  ch2.phaseAcc += ch2.phaseStep;
+  uint8_t idx = ch2.phaseAcc >> 16;
+  dac_output_voltage(DAC_CHANNEL_2, ch2.activeWaveTable[idx]);
+}
+
+// Initialize signal channel
+void initChannel(SignalChannel* ch, int timerID, void (*isr)()) {
+  generateWaveToTable(ch->waveTableA, "SINE", 255, 0);
+  ch->activeWaveTable = ch->waveTableA;
+
+  ch->timer = timerBegin(timerID, TIMER_DIVIDER, true);
+  timerAttachInterrupt(ch->timer, isr, true);
+  timerAlarmWrite(ch->timer, TIMER_INTERVAL_US, true);
+  timerAlarmEnable(ch->timer);
+}
+
+// Process command from serial port
+// Format: CH1 SINE 1000 1 200 50
+//         |   |    |    | |   |
+//         |   |    |    | |   +-- DC offset (0-255)
+//         |   |    |    | +------ Amplitude (0-255)
+//         |   |    |    +-------- Enable (0=off, 1=on)
+//         |   |    +------------- Frequency (Hz)
+//         |   +------------------ Waveform type
+//         +---------------------- Channel number
+void processCommand(String cmd) {
+  int channel;
+  char wave[10];
+  float freq;
+  int enable;
+  float amplitude;
+  float offset;
+
+  if (sscanf(cmd.c_str(), "CH%d %s %f %d %f %f", &channel, wave, &freq, &enable, &amplitude, &offset) != 6)
+    return;
+
+  SignalChannel* ch = (channel == 1) ? &ch1 : &ch2;
+  uint8_t* newTable = (ch->activeWaveTable == ch->waveTableA) ? ch->waveTableB : ch->waveTableA;
+  generateWaveToTable(newTable, wave, amplitude, offset);
+
+  portENTER_CRITICAL(&ch->mux);
+  ch->enabled = false;
+  ch->phaseAcc = 0;
+  ch->phaseStep = (uint32_t)((freq * TABLE_SIZE * 65536.0) / SAMPLE_RATE);
+  ch->activeWaveTable = newTable;
+  ch->enabled = (bool)enable;
+  portEXIT_CRITICAL(&ch->mux);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+
+  updateFrequency(&ch1, 1000);
+  updateFrequency(&ch2, 1000);
+
+  initChannel(&ch1, 0, onTimerCh1);
+  initChannel(&ch2, 2, onTimerCh2);
+
+  dac_output_enable(DAC_CHANNEL_1);
+  dac_output_enable(DAC_CHANNEL_2);
+
+  Serial.println("Generador listo - CH1 y CH2 totalmente independientes");
+}
+
+void loop() {
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+
+    if (cmd.length() == 0) return;
+
+    processCommand(cmd);
+    Serial.println("OK");
+  }
+}
+```
+
+## DDS Implementation Details
+
+### Direct Digital Synthesis (DDS) Algorithm
+
+The signal generator uses a phase accumulator approach:
+
+1. **Phase Accumulator**: 32-bit register that accumulates phase
+2. **Phase Step**: Determines frequency by how much phase advances per sample
+3. **Lookup Table**: 256-entry table containing one complete waveform cycle
+4. **Index Extraction**: Upper 8 bits of phase accumulator index into table
+
+```
+Phase Accumulator (32-bit)
+┌────────────────┬────────────────┐
+│  Table Index   │  Fractional    │
+│   (8 bits)     │   (24 bits)    │
+└────────────────┴────────────────┘
+       │                │
+       │                └─→ Fine frequency resolution
+       │
+       └─→ Waveform table index (0-255)
+```
+
+### Frequency Calculation
+
+The phase step is calculated as:
+
+```cpp
+phaseStep = (frequency × TABLE_SIZE × 65536) / SAMPLE_RATE
+```
+
+Where:
+- `frequency`: Desired output frequency in Hz
+- `TABLE_SIZE`: 256 samples per waveform cycle
+- `65536`: 2^16, converts to 16.16 fixed-point format
+- `SAMPLE_RATE`: 40,000 Hz (DAC update rate)
+
+**Example**: For 1000 Hz output:
+```
+phaseStep = (1000 × 256 × 65536) / 40000 = 419,430,400
+```
+
+### Frequency Range
+
+| Frequency | Phase Step | Notes |
+|-----------|------------|-------|
+| 0.01 Hz | 4,194 | Minimum practical frequency |
+| 1 Hz | 419,430 | Low frequency |
+| 100 Hz | 41,943,040 | Audio range |
+| 1 kHz | 419,430,400 | Standard test frequency |
+| 10 kHz | 4,194,304,000 | Maximum recommended |
+
+**Nyquist Limit**: With 40 kHz sample rate, maximum theoretical frequency is 20 kHz, but practical limit is ~10 kHz for clean sine waves.
+
+## Waveform Generation Using Lookup Tables
+
+### Sine Wave
+
+```cpp
+val = (sin(angle) + 1) * 0.5;  // Range: 0.0 to 1.0
+```
+
+Generates a pure sinusoidal waveform with minimal harmonic distortion.
+
+### Square Wave
+
+```cpp
+val = (i < TABLE_SIZE/2) ? 1.0 : 0.0;
+```
+
+Generates a 50% duty cycle square wave. Contains odd harmonics (3rd, 5th, 7th, etc.).
+
+### Triangle Wave
+
+```cpp
+if (i < TABLE_SIZE/2)
+  val = 2.0 * i / TABLE_SIZE;         // Rising edge: 0 to 1
+else
+  val = 2.0 - 2.0 * i / TABLE_SIZE;   // Falling edge: 1 to 0
+```
+
+Linear ramp up and down. Contains odd harmonics with 1/n² amplitude.
+
+### Sawtooth Wave
+
+```cpp
+val = (float)i / TABLE_SIZE;  // Range: 0.0 to 1.0
+```
+
+Linear ramp from 0 to max. Contains all harmonics (odd and even).
+
+### DC Level
+
+```cpp
+val = 0;  // Or any constant value
+```
+
+Constant voltage output, useful for biasing or testing.
+
+### Amplitude and Offset Scaling
+
+After generating the base waveform (0.0 to 1.0), apply amplitude and offset:
+
+```cpp
+table[i] = (uint8_t)constrain((val * amplitude) + offset, 0, 255);
+```
+
+**Example**:
+- `amplitude = 255`: Full scale (3.3V peak-to-peak)
+- `offset = 0`: Starts at 0V
+- `offset = 128`: Centers around 1.65V (AC coupled)
+
+## Output Specifications
+
+### Voltage Output
+
+| DAC Value | Output Voltage | Calculation |
+|-----------|----------------|-------------|
+| 0 | 0.0 V | 0 × (3.3/255) |
+| 64 | 0.83 V | 64 × (3.3/255) |
+| 128 | 1.65 V | 128 × (3.3/255) |
+| 192 | 2.48 V | 192 × (3.3/255) |
+| 255 | 3.3 V | 255 × (3.3/255) |
+
+### Output Impedance
+
+The ESP32 DAC has relatively high output impedance (~2 kΩ):
+
+- **High-Z Load** (>100 kΩ): Full 0-3.3V output
+- **10 kΩ Load**: Voltage drop due to divider effect
+- **1 kΩ Load**: Significant voltage drop
+- **Recommendation**: Use op-amp buffer for loads < 100 kΩ
+
+### Output Current
+
+- **Maximum Source Current**: ~1 mA
+- **Maximum Sink Current**: ~1 mA
+- **Recommended Load**: > 10 kΩ (unbuffered)
+
+## Double Buffering Technique
+
+The firmware uses double buffering to enable glitch-free waveform changes:
+
+1. **Two Tables**: Each channel has `waveTableA` and `waveTableB`
+2. **Active Table**: ISR reads from `activeWaveTable` pointer
+3. **Background Update**: New waveform generated in inactive table
+4. **Atomic Swap**: Pointer updated in critical section
+
+This prevents partial waveform updates during generation.
+
+## Command Protocol
+
+### Command Format
+
+```
+CH<channel> <waveform> <frequency> <enable> <amplitude> <offset>
+```
+
+### Examples
+
+```
+CH1 SINE 1000 1 255 0        # Channel 1: 1kHz sine, full amplitude, 0V offset
+CH2 SQUARE 500 1 128 64      # Channel 2: 500Hz square, half amplitude, 0.83V offset
+CH1 TRIANGLE 100 1 200 50    # Channel 1: 100Hz triangle, 78% amplitude, 0.65V offset
+CH2 SAW 2000 1 255 0         # Channel 2: 2kHz sawtooth, full amplitude
+CH1 DC 0 1 0 128             # Channel 1: DC output at 1.65V
+CH1 SINE 440 0 255 0         # Channel 1: Disable (enable=0)
+```
+
+## Applications
+
+- **Function Generator**: Laboratory test equipment
+- **Audio Synthesis**: Generate tones and waveforms
+- **Circuit Testing**: Provide test signals for debugging
+- **Sensor Simulation**: Emulate sensor outputs
+- **Control Signals**: PWM, modulation, etc.
+- **Physics Education**: Demonstrate waveforms and harmonics
+
+## Performance Optimization
+
+### ISR Efficiency
+
+The timer ISRs are optimized for speed:
+- Marked with `IRAM_ATTR` to run from RAM (faster)
+- Minimal computation (just accumulate and lookup)
+- Execution time: ~1-2 μs per channel
+
+### Critical Sections
+
+Used to protect shared variables between ISR and main code:
+```cpp
+portENTER_CRITICAL(&ch->mux);
+// Modify shared variables
+portEXIT_CRITICAL(&ch->mux);
+```
+
+### Timer Configuration
+
+```cpp
+timerBegin(timerID, TIMER_DIVIDER, true);
+```
+
+- **timerID**: 0 for CH1, 2 for CH2 (avoid collision)
+- **TIMER_DIVIDER**: 80 (80 MHz / 80 = 1 MHz timer clock)
+- **Auto-reload**: true (continuous operation)
+
+## Troubleshooting
+
+| Issue | Possible Cause | Solution |
+|-------|----------------|----------|
+| No output | DAC not enabled | Check `dac_output_enable()` called |
+| Distorted waveform | Frequency too high | Reduce frequency below 10 kHz |
+| Low amplitude | High load impedance | Add op-amp buffer |
+| Frequency drift | Thermal issues | Ensure adequate cooling |
+| Glitchy output | ISR timing conflict | Check timer IDs don't collide |
+| Channel 2 not working | Wrong GPIO | Verify GPIO 26 for DAC2 |
+
+## Source Code Location
+
+Complete signal generator implementations:
+- `source/osciloscopioygeneradordeSeñales/Serial/GENERADOR_OSCILOSCOPIO/GENERADOR_OSCILOSCOPIO.ino`
+- `source/osciloscopioygeneradordeSeñales/Serial/Generador_Senales_Serial/Generador_Senales_Serial.ino`
+- `source/osciloscopioygeneradordeSeñales/websocket/OSC_GEN/OSC_GEN.ino` (combined with oscilloscope)

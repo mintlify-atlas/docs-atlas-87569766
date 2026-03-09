@@ -1,0 +1,539 @@
+---
+title: "Spring-Mass System"
+description: "Study Hooke's law and oscillations using advanced homography-based video tracking"
+---
+
+## Overview
+
+The spring-mass system experiment explores elastic forces, simple harmonic motion, damping, and system transfer functions. This advanced experiment uses homography transformations to compensate for perspective distortion and camera movement.
+
+## Physics Theory
+
+### Hooke's Law and Simple Harmonic Motion
+
+For a mass $m$ attached to a spring with constant $k$:
+
+**Restoring Force**: $F = -kx$
+
+**Equation of Motion**: $m\ddot{y} + c\dot{y} + ky = 0$
+
+Where:
+- $k$ is spring constant (N/m)
+- $c$ is damping coefficient (N·s/m)
+- $y$ is displacement from equilibrium (m)
+
+### Damped Oscillation
+
+The solution is:
+
+$$y(t) = Ae^{-\gamma t}\cos(\omega t + \phi) + y_0$$
+
+Where:
+- $\gamma = c/(2m)$ is damping coefficient
+- $\omega = \sqrt{\omega_0^2 - \gamma^2}$ is damped frequency
+- $\omega_0 = \sqrt{k/m}$ is natural frequency
+- $\zeta = \gamma/\omega_0$ is damping ratio
+
+### System Parameters
+
+**Period**: $T = \frac{2\pi}{\omega}$
+
+**Frequency**: $f = \frac{1}{T}$
+
+**Spring Constant**: $k = m\omega_0^2$
+
+**Quality Factor**: $Q = \frac{\omega_0}{2\gamma}$
+
+### Transfer Function
+
+System response in Laplace domain:
+
+$$H(s) = \frac{1}{ms^2 + cs + k} = \frac{\omega_0^2}{s^2 + 2\zeta\omega_0 s + \omega_0^2}$$
+
+**Poles**:
+$$s_{1,2} = -\zeta\omega_0 \pm \omega_0\sqrt{\zeta^2 - 1}$$
+
+For underdamped ($\zeta < 1$):
+$$s_{1,2} = -\zeta\omega_0 \pm j\omega_0\sqrt{1 - \zeta^2}$$
+
+## Measurement Method
+
+PhysisLab uses **homography-based video tracking**:
+
+1. **Reference Markers**: Isosceles triangle with known dimensions
+2. **Affine Transformation**: Maps pixel coordinates to real-world meters
+3. **Per-Frame Calibration**: Compensates for camera/setup movement
+4. **Mass Tracking**: Separate color detection for oscillating mass
+
+**Source**: `~/workspace/source/Masa-Resorte/analisis.py`
+
+## Hardware Requirements
+
+- Spring (known or unknown spring constant)
+- Calibrated mass (measure with scale)
+- 3× colored markers forming isosceles triangle (reference frame)
+- 1× colored marker on oscillating mass (different color)
+- Camera (30+ FPS recommended)
+- Ruler or measuring tape
+- Stable mounting
+
+## Experimental Procedure
+
+<Steps>
+  <Step title="Setup Physical System">
+    **Reference Triangle**:
+    1. Attach 3 colored markers forming isosceles triangle to rigid frame
+    2. Measure base width and height accurately (in meters)
+    3. Position triangle so it's visible throughout oscillation
+    
+    **Spring-Mass**:
+    1. Hang spring vertically in front of reference triangle
+    2. Attach mass with colored marker
+    3. Allow system to reach equilibrium
+    4. Measure mass with scale (kg)
+  </Step>
+  
+  <Step title="Camera Setup">
+    - Position camera perpendicular to oscillation plane
+    - Ensure all 4 markers (3 reference + 1 mass) visible throughout
+    - Frame should include full range of oscillation
+    - Use tripod for stability (but homography handles small movements)
+  </Step>
+  
+  <Step title="Record Video">
+    1. Start recording
+    2. Displace mass vertically and release
+    3. Record at least 10-15 oscillations
+    4. Keep initial amplitude < 10 cm for linearity
+    5. Stop recording
+  </Step>
+  
+  <Step title="Run Analysis">
+    ```bash
+    cd ~/workspace/source/Masa-Resorte
+    python analisis.py
+    ```
+    
+    Enter video path when prompted:
+    ```
+    Ruta del video (ej: video_resorte.mp4): your_video.mp4
+    ```
+  </Step>
+  
+  <Step title="Interactive Configuration">
+    **Frame Selection**:
+    - Navigate: `d`/`a` (±1 frame), `D`/`A` (±10 frames), `g` (go to frame)
+    - Mark: `i` (inicio), `f` (fin)
+    - Confirm: `ENTER`
+    
+    **Color Calibration** (2 steps):
+    1. Select ROI on one reference marker → auto HSV detection
+    2. Select ROI on oscillating mass → auto HSV detection
+  </Step>
+  
+  <Step title="Verify Marker Detection">
+    - Script shows detected markers with labels:
+      - **TL** (Top-Left)
+      - **TR** (Top-Right)  
+      - **BL** (Bottom-Left)
+      - **BR** (Bottom-Right)
+    - Press ENTER to confirm
+  </Step>
+  
+  <Step title="Enter Physical Dimensions">
+    ```
+    --- Dimensiones reales del triángulo isósceles ---
+    Distancia base (BL → BR) en metros: 0.15
+    Distancia vertical (TOP → base) en metros: 0.20
+    
+    Masa del objeto (kg): 0.150
+    ```
+  </Step>
+  
+  <Step title="Tracking and Analysis">
+    - Automatic tracking with real-time visualization:
+      - Yellow circle: oscillating mass
+      - Cyan circles: homography OK
+      - Magenta circles: fallback to last valid transformation
+    - ESC to stop early
+  </Step>
+</Steps>
+
+## Code Walkthrough
+
+### Homography Geometry
+
+Detect and assign triangle markers (`analisis.py:161-172`):
+
+```python
+def asignar_triangulo(pts):
+    """
+    Asigna TL, TR, BL, BR a partir de 4 puntos.
+    TL = menor x+y (arriba-izquierda)
+    BR = mayor x+y (abajo-derecha)
+    TR = mayor x-y (arriba-derecha)
+    BL = menor x-y (abajo-izquierda)
+    """
+    pts = np.array(pts)
+    s = pts[:,0] + pts[:,1]
+    d = pts[:,0] - pts[:,1]
+    TL = pts[np.argmin(s)]
+    BR = pts[np.argmax(s)]
+    TR = pts[np.argmax(d)]
+    BL = pts[np.argmin(d)]
+    return TL, TR, BL, BR
+```
+
+### Affine Transformation
+
+Map image pixels to real-world coordinates (`analisis.py:210-221`):
+
+```python
+# Real-world coordinates (meters)
+# Origin at TOP, X right, Y down
+half_base = base_real_m / 2.0
+
+dst_pts = np.array([
+    [0.0,          0.0         ],   # TOP
+    [-half_base,   altura_real_m],  # BL
+    [ half_base,   altura_real_m],  # BR
+], dtype=np.float32)
+
+src_pts_ref = np.array([P_top_ref, P_bl_ref, P_br_ref], dtype=np.float32)
+
+# Affine transformation (3 points)
+M_ref = cv2.getAffineTransform(src_pts_ref, dst_pts)
+```
+
+### Per-Frame Homography Update
+
+Compensate for camera/setup movement (`analisis.py:258-270`):
+
+```python
+# Update transformation with markers from THIS frame
+centroides_f, _ = detectar_marcadores(frame, ref_lower, ref_upper)
+homografia_ok = False
+
+if len(centroides_f) >= 3:
+    try:
+        P_top_f, P_bl_f, P_br_f = asignar_triangulo(centroides_f[:3])
+        src_f = np.array([P_top_f, P_bl_f, P_br_f], dtype=np.float32)
+        M_f = cv2.getAffineTransform(src_f, dst_pts)
+        if M_f is not None:
+            M_actual = M_f
+            homografia_ok = True
+    except Exception:
+        pass  # Use previous transformation
+```
+
+### Position Transformation
+
+Convert pixel position to meters (`analisis.py:224-228`):
+
+```python
+def img_to_world(px_pt, M):
+    """Transform image point to world coordinates using affine matrix."""
+    p = np.array([px_pt[0], px_pt[1], 1.0], dtype=np.float64)
+    result = M @ p
+    return result[0], result[1]   # (x_m, y_m)
+```
+
+### Damped Sinusoid Fitting
+
+Fit to experimental data (`analisis.py:346-401`):
+
+```python
+def sinusoide_amortiguada(t, A, omega, phi, gamma, offset):
+    return A * np.exp(-gamma * t) * np.cos(omega * t + phi) + offset
+
+# Estimate initial omega from zero crossings
+y_centrado = y_data - np.mean(y_data)
+cruces = np.where(np.diff(np.sign(y_centrado)))[0]
+if len(cruces) >= 2:
+    T_est = 2 * np.mean(np.diff(t_raw[cruces]))
+    omega_est = 2 * np.pi / T_est if T_est > 0 else 5.0
+else:
+    omega_est = 5.0
+
+A0 = (np.max(y_data) - np.min(y_data)) / 2
+p0 = [A0, omega_est, 0.0, 0.05, 0.0]
+bounds = ([0, 0.5, -np.pi, 0, -0.5],
+          [2,  50, np.pi,  5,  0.5])
+
+popt, pcov = curve_fit(sinusoide_amortiguada, t_raw, y_data,
+                       p0=p0, bounds=bounds, maxfev=20000)
+A_fit, omega_fit, phi_fit, gamma_fit, off_fit = popt
+perr = np.sqrt(np.diag(pcov))
+
+# Calculate system parameters
+T_fit = 2 * np.pi / omega_fit
+f_fit = 1.0 / T_fit
+omega0 = np.sqrt(omega_fit**2 + gamma_fit**2)  # Natural frequency
+k_fit = masa_kg * omega0**2                     # Spring constant
+c_fit = 2 * masa_kg * gamma_fit                 # Damping coefficient
+zeta = gamma_fit / omega0                        # Damping ratio
+
+print(f"Período T          : {T_fit:.4f} s")
+print(f"Frec. natural ω₀   : {omega0:.4f} rad/s")
+print(f"Constante resorte k: {k_fit:.4f} N/m")
+print(f"Coef. amort.     c : {c_fit:.6f} N·s/m")
+print(f"Razón amort.     ζ : {zeta:.4f}")
+```
+
+### Transfer Function Analysis
+
+Calculate system poles (`analisis.py:409-426`):
+
+```python
+print(f"H(s) = 1 / ({masa_kg}·s² + {c_fit:.5f}·s + {k_fit:.4f})")
+print(f"\nForma normalizada (ω₀={omega0:.4f} rad/s, ζ={zeta:.4f}):")
+print(f"H(s) = {omega0**2:.4f} / (s² + {2*zeta*omega0:.4f}·s + {omega0**2:.4f})")
+
+print(f"\nPolos:")
+discriminante = (2*zeta*omega0)**2 - 4*omega0**2
+if discriminante < 0:
+    parte_real = -zeta * omega0
+    parte_imag = omega0 * np.sqrt(1 - zeta**2)
+    print(f"  s₁ = {parte_real:.4f} + {parte_imag:.4f}j")
+    print(f"  s₂ = {parte_real:.4f} - {parte_imag:.4f}j")
+else:
+    d = np.sqrt(discriminante)
+    print(f"  s₁ = {(-2*zeta*omega0 + d)/2:.4f}")
+    print(f"  s₂ = {(-2*zeta*omega0 - d)/2:.4f}")
+```
+
+## Data Analysis
+
+### Output Files
+
+**Data File**: `datos_masa_resorte.txt`
+```
+t(s)  x(m)  y(m)  y_desp(m)  vx(m/s)  vy(m/s)  ax(m/s2)  ay(m/s2)
+# k=12.3456 N/m  c=0.123456 N·s/m  omega0=9.0764 rad/s  zeta=0.0680
+0.000  0.0012  0.1542  0.0543  0.0000  0.0000  0.0000  0.0000
+0.033  0.0014  0.1489  0.0490  0.0061  -1.6061  0.0303  -48.6667
+...
+```
+
+**Figures Generated**:
+1. `fig1_cinematica.png` - Displacement, velocity, acceleration vs time
+2. `fig2_espacio_fases.png` - Phase space portrait (y vs vy)
+3. `fig3_espectro.png` - Power spectral density (frequency analysis)
+4. `fig4_bode.png` - Bode plot (magnitude and phase)
+5. `fig5_polos_ceros.png` - Pole-zero diagram
+
+### Example Results
+
+```
+=======================================================
+  RESULTADOS DEL AJUSTE SINUSOIDAL AMORTIGUADO
+=======================================================
+  Amplitud inicial A : 4.523 cm  ± 0.042
+  Frecuencia amort. ω: 9.0143 rad/s  ± 0.0234
+  Período T          : 0.6972 s
+  Frecuencia f       : 1.4343 Hz
+  Amortiguamiento γ  : 0.6174 s⁻¹  ± 0.0123
+  Frec. natural ω₀   : 9.0764 rad/s
+  Constante resorte k: 12.3456 N/m
+  Coef. amort.     c : 0.185220 N·s/m
+  Razón amort.     ζ : 0.0680  (subamortiguado)
+=======================================================
+```
+
+## Visualization
+
+### Bode Diagram
+
+Frequency response of the system (`analisis.py:516-543`):
+
+```python
+omega_range = np.logspace(-1, 2, 1000)   # rad/s
+s_vals = 1j * omega_range
+H_vals = 1.0 / (masa_kg * s_vals**2 + c_fit * s_vals + k_fit)
+
+H_mag_dB = 20 * np.log10(np.abs(H_vals))
+H_fase_deg = np.degrees(np.angle(H_vals))
+
+fig4, (ax4a, ax4b) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+
+# Magnitude
+ax4a.semilogx(omega_range, H_mag_dB, color='#00BFFF', lw=2)
+ax4a.axvline(omega0, color='white', lw=1.2, linestyle='--', 
+             label=f'ω₀={omega0:.3f} rad/s')
+ax4a.set_ylabel("|H(jω)| (dB)")
+ax4a.legend()
+
+# Phase
+ax4b.semilogx(omega_range, H_fase_deg, color='#FF6347', lw=2)
+ax4b.set_ylabel("∠H(jω) (°)")
+ax4b.set_xlabel("ω (rad/s)")
+```
+
+### Pole-Zero Diagram
+
+Visualize system stability (`analisis.py:545-577`):
+
+```python
+fig5, ax5 = plt.subplots(figsize=(7, 7))
+
+if discriminante < 0:
+    polos = [complex(parte_real,  parte_imag),
+             complex(parte_real, -parte_imag)]
+else:
+    d = np.sqrt(discriminante)
+    polos = [(-2*zeta*omega0 + d)/2, (-2*zeta*omega0 - d)/2]
+
+for p in polos:
+    if np.iscomplex(p):
+        ax5.plot(p.real, p.imag, 'rx', ms=14, mew=3)
+    else:
+        ax5.plot(p, 0, 'rx', ms=14, mew=3)
+
+# Circle at natural frequency
+theta_circ = np.linspace(0, 2*np.pi, 200)
+ax5.plot(omega0*np.cos(theta_circ), omega0*np.sin(theta_circ),
+         '--', color='gray', alpha=0.5, label=f'|s|=ω₀={omega0:.3f}')
+
+ax5.axhline(0, color='gray', lw=0.8)
+ax5.axvline(0, color='gray', lw=0.8)
+ax5.set_xlabel("Re(s)")
+ax5.set_ylabel("Im(s)")
+ax5.set_aspect('equal')
+```
+
+### Phase Space Portrait
+
+```python
+fig2, ax2 = plt.subplots(figsize=(7, 7))
+
+sc = ax2.scatter(y_data*100, vy*100, c=t_raw, cmap='plasma', s=10, alpha=0.8)
+plt.colorbar(sc, ax=ax2, label='t (s)')
+ax2.set_xlabel("Desplazamiento y (cm)")
+ax2.set_ylabel("Velocidad vy (cm/s)")
+ax2.axhline(0, color='gray', lw=0.5, linestyle=':')
+ax2.axvline(0, color='gray', lw=0.5, linestyle=':')
+```
+
+## Verification and Validation
+
+### Independent Spring Constant Measurement
+
+Verify k using static displacement:
+
+```python
+import numpy as np
+
+# Hang known masses and measure displacement
+masses = np.array([0.050, 0.100, 0.150, 0.200, 0.250])  # kg
+displacements = np.array([0.041, 0.081, 0.122, 0.162, 0.203])  # m
+
+g = 9.8  # m/s²
+forces = masses * g
+
+# Linear fit: F = k·x
+k_static, intercept = np.polyfit(displacements, forces, 1)
+
+print(f"Spring constant (static): {k_static:.2f} N/m")
+print(f"Spring constant (dynamic): {k_fit:.2f} N/m")
+print(f"Difference: {abs(k_static - k_fit)/k_static * 100:.1f}%")
+```
+
+Expect < 5% difference for good agreement.
+
+### Energy Dissipation
+
+Calculate energy loss per cycle:
+
+```python
+# Energy at time t
+E_t = 0.5 * k_fit * y_data**2  # Potential energy
+
+# Energy decay rate
+E_decay_theory = E_t[0] * np.exp(-2 * gamma_fit * t_raw)
+
+import matplotlib.pyplot as plt
+plt.plot(t_raw, E_t, label='Measured')
+plt.plot(t_raw, E_decay_theory, '--', label='Theory')
+plt.xlabel('Time (s)')
+plt.ylabel('Energy (J)')
+plt.legend()
+```
+
+## Tips for Best Results
+
+<AccordionGroup>
+  <Accordion title="Hardware Setup">
+    - Use spring with linear response (avoid overstretching)
+    - Reference triangle should be rigid (cardboard/foam board)
+    - All markers should be same size for consistent detection
+    - Mass marker attached at center of mass
+    - Ensure vertical alignment (use plumb line)
+  </Accordion>
+  
+  <Accordion title="Measurement Technique">
+    - Keep amplitude < 10% of spring length for linearity
+    - Minimize lateral motion (pull straight down)
+    - Wait for transients to settle before starting video
+    - Record at least 10 complete oscillations
+    - Avoid exciting higher harmonics
+  </Accordion>
+  
+  <Accordion title="Marker Detection">
+    - Use high-contrast colors
+    - Matte finish (avoid glossy/reflective)
+    - Markers large enough to detect clearly
+    - Uniform lighting across field of view
+    - Check all 4 markers visible in every frame
+  </Accordion>
+  
+  <Accordion title="Calibration">
+    - Measure triangle dimensions multiple times
+    - Use digital calipers for accuracy
+    - Measure mass with calibrated scale
+    - Triangle should be in same plane as motion
+  </Accordion>
+</AccordionGroup>
+
+## Advanced Analysis
+
+### Extracting Spring Constant k
+
+From the fitted parameters:
+
+$$k = m\omega_0^2 = m(\omega^2 + \gamma^2)$$
+
+### Quality Factor
+
+Measure of damping:
+
+$$Q = \frac{\omega_0}{2\gamma} = \frac{1}{2\zeta}$$
+
+Higher Q → less damping → more oscillations before decay.
+
+### Logarithmic Decrement
+
+For consecutive peaks:
+
+$$\delta = \ln\frac{A_n}{A_{n+1}} = \gamma T = \frac{2\pi\zeta}{\sqrt{1-\zeta^2}}$$
+
+## Troubleshooting
+
+| Issue | Solution |
+|-------|----------|
+| Homography fails frequently | Larger/brighter markers, better lighting |
+| Erratic position data | Reduce motion blur, increase camera FPS |
+| Poor fit to data | Check for non-linear spring behavior, air currents |
+| k value inconsistent | Verify mass measurement, check spring linearity |
+| Lateral motion detected | Ensure vertical alignment, reduce initial amplitude |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Projectile Motion" icon="baseball" href="/experiments/projectile-motion">
+    Study 2D motion with parabolic trajectories
+  </Card>
+  
+  <Card title="Data Analysis Guide" icon="chart-line" href="/guides/data-analysis">
+    Deep dive into system response analysis
+  </Card>
+</CardGroup>

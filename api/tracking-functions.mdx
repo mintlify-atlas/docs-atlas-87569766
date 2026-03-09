@@ -1,0 +1,430 @@
+---
+title: 'Computer Vision Tracking Functions'
+description: 'Camera-based object tracking functions using OpenCV for physics experiments'
+---
+
+## Overview
+
+PhysisLab uses OpenCV for real-time object tracking across multiple physics experiments. The tracking system includes camera initialization, color-based object detection, ROI selection, and centroid calculation for position tracking.
+
+## Camera Initialization
+
+### Configure Camera Settings
+
+Initialize camera with custom resolution and frame rate settings.
+
+```python
+import cv2
+
+# Camera setup with desired FPS and resolution
+DESIRED_FPS = 10
+RESOLUTION = (320, 240)  # (width, height)
+
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUTION[0])
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUTION[1])
+cap.set(cv2.CAP_PROP_FPS, DESIRED_FPS)
+```
+
+**Source:** `FreeFallCam.py:31-38`
+
+### Measure Real FPS
+
+Verify actual camera frame rate by measuring capture time.
+
+```python
+import time
+
+# Measure real FPS with test frames
+num_test_frames = 60
+start = time.time()
+for i in range(num_test_frames):
+    ret, frame = cap.read()
+end = time.time()
+measured_fps = num_test_frames / (end - start)
+
+# Use minimum of requested and measured FPS
+fps_from_cap = cap.get(cv2.CAP_PROP_FPS)
+real_fps = min(fps_from_cap, measured_fps)
+```
+
+**Source:** `FreeFallCam.py:46-53`
+
+## ROI Selection
+
+### Interactive ROI Selection
+
+Use OpenCV's built-in ROI selector for defining object regions.
+
+```python
+# Capture snapshot frame
+ret, snapshot = cap.read()
+
+# Select region of interest interactively
+roi = cv2.selectROI("Selecciona region del objeto", snapshot, False, False)
+cv2.destroyWindow("Selecciona region del objeto")
+
+x, y, w, h = roi
+selected_region = snapshot[y:y+h, x:x+w]
+```
+
+**Source:** `FreeFallCam.py:80-84`, `analisis.py:90`
+
+<ParamField path="windowName" type="string" required>
+  Name of the ROI selection window
+</ParamField>
+
+<ParamField path="frame" type="numpy.ndarray" required>
+  Image frame for ROI selection
+</ParamField>
+
+<ParamField path="showCrosshair" type="bool" default="False">
+  Show crosshair in selection window
+</ParamField>
+
+<ParamField path="fromCenter" type="bool" default="False">
+  Select ROI from center point
+</ParamField>
+
+**Returns:** Tuple `(x, y, w, h)` representing ROI coordinates and dimensions
+
+## Color Calibration (HSV)
+
+### Extract HSV Color Range
+
+Calculate HSV color thresholds from a selected region for object detection.
+
+```python
+import numpy as np
+
+# Convert ROI to HSV and calculate mean values
+hsv_region = cv2.cvtColor(selected_region, cv2.COLOR_BGR2HSV)
+mean_hsv = np.mean(hsv_region.reshape(-1, 3), axis=0).astype(int)
+
+# Define tolerance for color matching
+tolerance = np.array([25, 85, 85])  # H, S, V tolerance
+
+# Calculate upper and lower bounds
+lower_color = np.clip(mean_hsv - tolerance, 0, 255)
+upper_color = np.clip(mean_hsv + tolerance, 0, 255)
+
+print("HSV promedio:", mean_hsv)
+```
+
+**Source:** `FreeFallCam.py:86-92`
+
+### Adaptive HSV Thresholding
+
+Calculate adaptive color ranges based on measured saturation and value.
+
+```python
+# Extract mean HSV values
+h_mean = np.mean(hsv_objeto[:, :, 0])
+s_mean = np.mean(hsv_objeto[:, :, 1])
+v_mean = np.mean(hsv_objeto[:, :, 2])
+
+# Adaptive margins
+margen_h = 15
+margen_s = max(50, s_mean * 0.45)
+margen_v = max(50, v_mean * 0.45)
+
+# Build threshold arrays
+hsv_lower = np.array([max(0,   h_mean - margen_h),
+                      max(0,   s_mean - margen_s),
+                      max(0,   v_mean - margen_v)])
+hsv_upper = np.array([min(179, h_mean + margen_h),
+                      min(255, s_mean + margen_s),
+                      min(255, v_mean + margen_v)])
+```
+
+**Source:** `analisis.py:97-99`, `Masa-Resorte/analisis.py:99-108`
+
+## Object Detection with Contours
+
+### Color-Based Masking
+
+Apply HSV color filtering to isolate objects in frame.
+
+```python
+# Convert frame to HSV color space
+hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+# Create binary mask using color thresholds
+mask = cv2.inRange(hsv, lower_color, upper_color)
+
+# Morphological operations to reduce noise
+kernel = np.ones((5, 5), np.uint8)
+mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+```
+
+**Source:** `FreeFallCam.py:136-141`, `analisis.py:154-155`
+
+<ParamField path="src" type="numpy.ndarray" required>
+  Input HSV image
+</ParamField>
+
+<ParamField path="lowerb" type="numpy.ndarray" required>
+  Lower HSV threshold array [H, S, V]
+</ParamField>
+
+<ParamField path="upperb" type="numpy.ndarray" required>
+  Upper HSV threshold array [H, S, V]
+</ParamField>
+
+**Returns:** Binary mask where white pixels (255) match the color range
+
+### Find Contours
+
+Extract object contours from binary mask.
+
+```python
+# Find external contours in mask
+contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+# Filter by area threshold
+if contours:
+    # Get largest contour by area
+    c = max(contours, key=cv2.contourArea)
+    
+    # Check minimum area threshold
+    if cv2.contourArea(c) > 300:
+        # Process this contour
+        pass
+```
+
+**Source:** `FreeFallCam.py:143-150`, `analisis.py:157-160`
+
+## Centroid Calculation
+
+### Calculate Center of Mass
+
+Compute object centroid using image moments.
+
+```python
+# Calculate moments of the contour
+M = cv2.moments(contour)
+
+# Check for valid moments (avoid division by zero)
+if M["m00"] != 0:
+    # Calculate centroid coordinates
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+    
+    # Draw centroid on frame
+    cv2.circle(frame, (cx, cy), 6, (0, 255, 0), -1)
+```
+
+**Source:** `FreeFallCam.py:151-156`, `analisis.py:161-165`
+
+<ParamField path="M" type="dict" required>
+  Moments dictionary from `cv2.moments()`
+</ParamField>
+
+<ParamField path="M['m00']" type="float">
+  Zeroth moment (area)
+</ParamField>
+
+<ParamField path="M['m10']" type="float">
+  First moment in X
+</ParamField>
+
+<ParamField path="M['m01']" type="float">
+  First moment in Y
+</ParamField>
+
+**Centroid Formula:**
+- `cx = M["m10"] / M["m00"]`
+- `cy = M["m01"] / M["m00"]`
+
+## Frame-by-Frame Tracking Loop
+
+### State Machine Pattern
+
+Implement tracking with state transitions for event detection.
+
+```python
+# Initialize tracking state
+state = "WAIT_START"
+prev_cy = None
+frame_count = 0
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    frame_count += 1
+    
+    # Process frame (HSV conversion, masking, contour detection)
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower_color, upper_color)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, 
+                                    cv2.CHAIN_APPROX_SIMPLE)
+    
+    cy = None
+    if contours:
+        c = max(contours, key=cv2.contourArea)
+        M = cv2.moments(c)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            
+            # State machine logic
+            if prev_cy is not None:
+                if state == "WAIT_START":
+                    if prev_cy < y_start_line and cy >= y_start_line:
+                        frame_start = frame_count
+                        state = "WAIT_END"
+                
+                elif state == "WAIT_END":
+                    if prev_cy < y_end_line and cy >= y_end_line:
+                        frame_end = frame_count
+                        delta_frames = frame_end - frame_start
+                        delta_t = delta_frames / real_fps
+                        state = "DONE"
+            
+            prev_cy = cy
+    
+    # Display frame
+    cv2.imshow("Frame", frame)
+    if cv2.waitKey(1) & 0xFF == 27:
+        break
+```
+
+**Source:** `FreeFallCam.py:121-216`
+
+## Pixel-to-Meter Calibration
+
+### Manual Distance Calibration
+
+Convert pixel measurements to physical units using known distance.
+
+```python
+# Select two points with known real-world distance
+puntos = []
+
+def click(event, x, y, flags, param):
+    global puntos
+    if event == cv2.EVENT_LBUTTONDOWN:
+        puntos.append((x, y))
+        print(f"Punto: {x},{y}")
+
+cv2.namedWindow("Calibracion")
+cv2.setMouseCallback("Calibracion", click)
+
+# Wait for user to select 2 points
+while len(puntos) < 2:
+    cv2.imshow("Calibracion", frame)
+    cv2.waitKey(1)
+
+# Calculate scale factor
+dist_px = np.linalg.norm(np.array(puntos[0]) - np.array(puntos[1]))
+escala = distancia_real_m / dist_px  # meters per pixel
+
+print(f"Escala calculada: {escala} m/pixel")
+```
+
+**Source:** `analisis.py:107-136`
+
+## Multi-Object Detection
+
+### Detect Multiple Markers
+
+Identify and track multiple reference points simultaneously.
+
+```python
+def detectar_marcadores(frame, lower, upper, kernel_sz=7, n_esperados=3):
+    """Detect n largest blobs and return their centroids."""
+    hsv   = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask  = cv2.inRange(hsv, lower, upper)
+    k     = np.ones((kernel_sz, kernel_sz), np.uint8)
+    mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+    mask  = cv2.morphologyEx(mask, cv2.MORPH_DILATE, k)
+    
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, 
+                                cv2.CHAIN_APPROX_SIMPLE)
+    centroides = []
+    
+    # Sort by area and take largest n contours
+    for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:n_esperados]:
+        M = cv2.moments(c)
+        if M["m00"] > 0:
+            centroides.append((M["m10"]/M["m00"], M["m01"]/M["m00"]))
+    
+    return centroides, mask
+```
+
+**Source:** `Masa-Resorte/analisis.py:146-159`
+
+## Video Processing
+
+### Frame Selection Interface
+
+Navigate video frames to select analysis range.
+
+```python
+frame_actual = 0
+frame_inicio = None
+frame_fin = None
+
+while True:
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_actual)
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    # Display current frame
+    display = frame.copy()
+    cv2.putText(display, f"Frame: {frame_actual}", (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
+    cv2.imshow("Seleccion Frames", display)
+    
+    key = cv2.waitKey(0)
+    
+    if key == ord('d'):    # Next frame
+        frame_actual = min(frame_actual + 1, total_frames - 1)
+    elif key == ord('a'):  # Previous frame
+        frame_actual = max(frame_actual - 1, 0)
+    elif key == ord('i'):  # Mark start
+        frame_inicio = frame_actual
+    elif key == ord('f'):  # Mark end
+        frame_fin = frame_actual
+    elif key == 13:        # ENTER confirms
+        if frame_inicio is not None and frame_fin is not None:
+            break
+```
+
+**Source:** `analisis.py:28-80`, `Pendulo/analisis.py:26-68`
+
+## Best Practices
+
+### Error Handling
+
+Always check for valid camera capture and moment calculations:
+
+```python
+# Check camera opened successfully
+if not cap.isOpened():
+    print("Error abriendo video")
+    exit()
+
+# Check for valid moments before division
+if M["m00"] != 0:
+    cx = int(M["m10"] / M["m00"])
+    cy = int(M["m01"] / M["m00"])
+else:
+    # Handle invalid centroid
+    continue
+```
+
+### Memory Management
+
+Release resources after tracking:
+
+```python
+cap.release()
+cv2.destroyAllWindows()
+```
+
+**Source:** `FreeFallCam.py:218-220`

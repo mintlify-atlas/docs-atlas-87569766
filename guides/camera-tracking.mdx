@@ -1,0 +1,310 @@
+---
+title: Camera-Based Motion Tracking
+description: Learn how to use OpenCV for real-time object tracking in physics experiments
+---
+
+PhysisLab uses OpenCV for camera-based motion tracking in experiments like free fall, pendulum motion, and projectile trajectories. This guide shows you how to implement robust tracking using color detection and centroid calculation.
+
+## Overview
+
+The camera tracking system consists of four key stages:
+
+1. **Camera calibration** - Configure resolution and measure real FPS
+2. **ROI selection** - Select the object to track and calibrate color
+3. **Frame processing** - Apply HSV filtering and morphological operations
+4. **Centroid tracking** - Detect contours and calculate object position
+
+## Camera Setup and Calibration
+
+### Initialize Camera with Desired FPS
+
+Proper FPS measurement is critical for accurate time-based calculations.
+
+```python FreeFallCam.py
+import cv2
+import numpy as np
+import time
+
+DESIRED_FPS = 10
+RESOLUTION = (320, 240)
+
+cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUTION[0])
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUTION[1])
+cap.set(cv2.CAP_PROP_FPS, DESIRED_FPS)
+
+# Get actual FPS from camera
+fps_from_cap = cap.get(cv2.CAP_PROP_FPS)
+if fps_from_cap == 0:
+    fps_from_cap = DESIRED_FPS
+
+# Measure real FPS empirically
+num_test_frames = 60
+start = time.time()
+for i in range(num_test_frames):
+    ret, frame = cap.read()
+end = time.time()
+measured_fps = num_test_frames / (end - start)
+
+real_fps = min(fps_from_cap, measured_fps)
+print(f"FPS final usado para cálculos: {real_fps:.2f}")
+```
+
+<Note>
+Always measure the **actual FPS** rather than trusting the configured value. Different cameras and USB bandwidth limitations can result in lower frame rates than requested.
+</Note>
+
+## ROI Selection and Color Calibration
+
+### Interactive ROI Selection
+
+Use OpenCV's built-in ROI selector to calibrate the object color:
+
+```python FreeFallCam.py
+# Capture a reference frame
+while True:
+    ret, frame = cap.read()
+    cv2.imshow("Camara - ESPACIO para capturar", frame)
+    key = cv2.waitKey(1) & 0xFF
+    if key == 32:  # SPACE key
+        snapshot = frame.copy()
+        break
+
+# Select ROI around the object
+roi = cv2.selectROI("Selecciona region del objeto", snapshot, False, False)
+cv2.destroyWindow("Selecciona region del objeto")
+
+x, y, w, h = roi
+selected_region = snapshot[y:y+h, x:x+w]
+```
+
+### HSV Color Range Calibration
+
+Calculate color thresholds in HSV space for robust tracking:
+
+```python FreeFallCam.py
+tolerance = np.array([25, 85, 85])  # H, S, V tolerance
+
+hsv_region = cv2.cvtColor(selected_region, cv2.COLOR_BGR2HSV)
+mean_hsv = np.mean(hsv_region.reshape(-1, 3), axis=0).astype(int)
+
+lower_color = np.clip(mean_hsv - tolerance, 0, 255)
+upper_color = np.clip(mean_hsv + tolerance, 0, 255)
+
+print("HSV promedio:", mean_hsv)
+```
+
+<Tip>
+For objects with varying saturation or brightness, use **adaptive tolerances**:
+
+```python analisis.py (pendulum)
+margen_h = 15
+margen_s = max(40, s_bob * 0.4)  # At least 40, or 40% of mean
+margen_v = max(40, v_bob * 0.4)
+```
+</Tip>
+
+## Frame Processing Pipeline
+
+### Apply HSV Mask and Morphology
+
+The standard processing pipeline removes noise and fills gaps:
+
+<Steps>
+  <Step title="Convert to HSV">
+    Convert the frame from BGR to HSV color space for color-based filtering:
+    
+    ```python FreeFallCam.py
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower_color, upper_color)
+    ```
+  </Step>
+
+  <Step title="Morphological Opening">
+    Remove small noise pixels with erosion followed by dilation:
+    
+    ```python FreeFallCam.py
+    kernel = np.ones((5,5), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    ```
+  </Step>
+
+  <Step title="Morphological Dilation">
+    Fill small gaps in the detected object:
+    
+    ```python FreeFallCam.py
+    mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+    ```
+  </Step>
+</Steps>
+
+### Kernel Size Selection
+
+<CodeGroup>
+```python Small Objects (5x5)
+kernel = np.ones((5,5), np.uint8)
+mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+```
+
+```python Medium Objects (7x7)
+kernel = np.ones((7,7), np.uint8)
+mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+```
+
+```python Large/Far Objects (9x9)
+kernel = np.ones((9,9), np.uint8)
+mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+```
+</CodeGroup>
+
+## Contour Detection and Centroid Calculation
+
+### Find and Filter Contours
+
+Extract contours from the binary mask and select the largest one:
+
+```python FreeFallCam.py
+contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+if contours:
+    c = max(contours, key=cv2.contourArea)
+    
+    # Filter by minimum area to avoid noise
+    if cv2.contourArea(c) > 300:
+        M = cv2.moments(c)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            
+            cv2.circle(frame, (cx, cy), 6, (0,255,0), -1)
+```
+
+<Note>
+The **moment M["m00"]** represents the area of the contour. Always check that it's non-zero to avoid division by zero errors.
+</Note>
+
+### Pixel to World Coordinate Conversion
+
+For the **kinematic experiments**, you need to convert pixel coordinates to real-world measurements:
+
+```python analisis.py (kinematic)
+# Calibration by selecting two points with known distance
+dist_px = np.linalg.norm(np.array(puntos[0]) - np.array(puntos[1]))
+escala = distancia_real_m / dist_px  # meters per pixel
+
+print(f"Escala calculada: {escala} m/pixel")
+
+# Convert tracked position to meters
+x_m = cx * escala
+y_m = cy * escala
+```
+
+For the **pendulum experiment**, the conversion accounts for pivot position:
+
+```python analisis.py (pendulum)
+# Position in meters (origin at pivot, Y axis pointing up)
+dx_px = cx - pivot_px[0]
+dy_px = pivot_px[1] - cy  # invert Y for mathematical axis
+
+x_m = dx_px * escala
+y_m = dy_px * escala
+
+# Calculate angle from vertical
+theta = np.arctan2(dx_px, pivot_px[1] - cy)
+```
+
+## Advanced: Multi-Object Tracking
+
+For experiments requiring multiple markers (like the spring-mass system), detect the top N contours:
+
+```python analisis.py (masa-resorte)
+def detectar_marcadores(frame, lower, upper, kernel_sz=7, n_esperados=3):
+    """Returns list of centroids of the n largest blobs."""
+    hsv   = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask  = cv2.inRange(hsv, lower, upper)
+    k     = np.ones((kernel_sz, kernel_sz), np.uint8)
+    mask  = cv2.morphologyEx(mask, cv2.MORPH_OPEN,   k)
+    mask  = cv2.morphologyEx(mask, cv2.MORPH_DILATE, k)
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    centroides = []
+    for c in sorted(cnts, key=cv2.contourArea, reverse=True)[:n_esperados]:
+        M = cv2.moments(c)
+        if M["m00"] > 0:
+            centroides.append((M["m10"]/M["m00"], M["m01"]/M["m00"]))
+    return centroides, mask
+```
+
+## Video File Analysis
+
+For analyzing recorded videos, add frame navigation:
+
+```python analisis.py (pendulum)
+frame_actual = 0
+frame_inicio = None
+frame_fin = None
+
+while True:
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_actual)
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    cv2.putText(frame, f"Frame: {frame_actual}", (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.imshow("Seleccion Frames", frame)
+    key = cv2.waitKey(0)
+    
+    if key == ord('d'):
+        frame_actual = min(frame_actual + 1, total_frames - 1)
+    elif key == ord('a'):
+        frame_actual = max(frame_actual - 1, 0)
+    elif key == ord('i'):
+        frame_inicio = frame_actual
+    elif key == ord('f'):
+        frame_fin = frame_actual
+    elif key == 13:  # ENTER
+        if frame_inicio is not None and frame_fin is not None:
+            break
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Lighting" icon="lightbulb">
+    Use consistent, diffuse lighting to minimize shadows and reflections on the tracked object.
+  </Card>
+  
+  <Card title="Object Color" icon="palette">
+    Choose bright, saturated colors that contrast strongly with the background.
+  </Card>
+  
+  <Card title="Camera Position" icon="camera">
+    Mount the camera perpendicular to the plane of motion to minimize perspective distortion.
+  </Card>
+  
+  <Card title="Frame Rate" icon="clock">
+    Use higher frame rates (30-60 fps) for fast-moving objects like free fall experiments.
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| Object not detected | Increase HSV tolerance or adjust lighting |
+| Multiple false detections | Decrease tolerance, increase min area threshold |
+| Jittery tracking | Apply temporal smoothing or increase kernel size |
+| Wrong FPS measurements | Ensure camera has warmed up, measure over 60+ frames |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Color Detection" icon="eye-dropper" href="/guides/color-detection">
+    Learn advanced HSV color calibration techniques
+  </Card>
+  
+  <Card title="Data Analysis" icon="chart-line" href="/guides/data-analysis">
+    Process tracking data to extract physics measurements
+  </Card>
+</CardGroup>

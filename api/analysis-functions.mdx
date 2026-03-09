@@ -1,0 +1,637 @@
+---
+title: 'Data Analysis Functions'
+description: 'Scientific data processing, curve fitting, and statistical analysis for physics experiments'
+---
+
+## Overview
+
+PhysisLab provides comprehensive data analysis functions for processing experimental measurements. This includes data loading, statistical calculations, curve fitting with scipy, derivative computation, frequency analysis, and plotting with matplotlib.
+
+## Data Loading
+
+### Load Time Series Data
+
+Parse experimental data files with custom delimiters.
+
+```python
+import numpy as np
+
+# Load data from space/tab-separated file with header
+datos = np.loadtxt("posicion_vs_tiempo.txt", skiprows=1)
+
+t = datos[:, 0]  # Time column
+x = datos[:, 1]  # Position X
+y = datos[:, 2]  # Position Y
+```
+
+**Source:** `analisis.py:191-192`
+
+### Parse Custom Format with Timestamps
+
+Handle files with comma-separated values and timestamps.
+
+```python
+times = []
+with open("mediciones_80cm.txt", "r") as f:
+    for line in f:
+        line = line.strip()
+        if not line:
+            continue  # Skip empty lines
+        try:
+            # Split by comma and take second column
+            t_str = line.split(",")[1].strip()
+            times.append(float(t_str))
+        except IndexError:
+            print("Línea malformada:", line)
+        except ValueError:
+            print("Valor no numérico:", line)
+
+times = np.array(times)
+```
+
+**Source:** `procesar.py:8-22`
+
+<ParamField path="filename" type="string" required>
+  Path to data file
+</ParamField>
+
+<ParamField path="delimiter" type="string" default=",">
+  Column separator character
+</ParamField>
+
+## Statistical Analysis
+
+### Basic Statistics
+
+Calculate mean, standard deviation, and standard error.
+
+```python
+import numpy as np
+
+# Dataset from experimental measurements
+N = len(times)
+
+# Mean value
+t_mean = np.mean(times)
+
+# Standard deviation (sample)
+t_std = np.std(times, ddof=1)
+
+# Standard error of the mean
+t_err = t_std / np.sqrt(N)
+
+print(f"Tiempo medio: {t_mean:.5f} s")
+print(f"Desviación estándar: {t_std:.5f} s")
+print(f"Error de la media: {t_err:.5f} s")
+```
+
+**Source:** `procesar.py:32-42`
+
+<ParamField path="ddof" type="int" default="1">
+  Delta degrees of freedom for sample standard deviation
+</ParamField>
+
+### Error Propagation
+
+Calculate uncertainty in derived quantities.
+
+```python
+# Calculate g from free fall: g = 2s / t²
+s = 0.80  # distance in meters
+g_values = 2 * s / times**2
+g_mean = np.mean(g_values)
+
+# Propagate uncertainty: σ_g = g · 2 · (σ_t / t)
+g_err = g_mean * 2 * (t_err / t_mean)
+
+print(f"g promedio: {g_mean:.3f} m/s^2")
+print(f"Incertidumbre en g: ±{g_err:.3f} m/s^2")
+```
+
+**Source:** `procesar.py:36-42`
+
+## Data Smoothing
+
+### Moving Average Filter
+
+Apply sliding window smoothing to reduce noise.
+
+```python
+def smooth(arr, w=5):
+    """Apply moving average with window size w."""
+    kernel = np.ones(w) / w
+    return np.convolve(arr, kernel, mode='same')
+
+# Smooth position data
+y_smoothed = smooth(y_data, w=5)
+x_smoothed = smooth(x_data, w=5)
+```
+
+**Source:** `Masa-Resorte/analisis.py:322-324`, `Pendulo/analisis.py:271-272`
+
+<ParamField path="arr" type="numpy.ndarray" required>
+  Input array to smooth
+</ParamField>
+
+<ParamField path="w" type="int" default="5">
+  Window size for moving average
+</ParamField>
+
+**Returns:** Smoothed array with same length as input
+
+## Derivative Calculation
+
+### Numerical Differentiation
+
+Compute derivatives using numpy gradient method.
+
+```python
+import numpy as np
+
+# First derivative: velocity from position
+vx = np.gradient(x_smoothed, t)
+vy = np.gradient(y_smoothed, t)
+
+# Apply additional smoothing to velocity
+vx = smooth(vx, w=5)
+vy = smooth(vy, w=5)
+
+# Second derivative: acceleration from velocity
+ax = np.gradient(vx, t)
+ay = np.gradient(vy, t)
+
+# Smooth acceleration
+ax = smooth(ax, w=5)
+ay = smooth(ay, w=5)
+
+# Total velocity magnitude
+v_total = np.sqrt(vx**2 + vy**2)
+```
+
+**Source:** `Masa-Resorte/analisis.py:335-341`, `MovimientoParabolico/analisis.py:291-295`
+
+<ParamField path="f" type="numpy.ndarray" required>
+  Function values to differentiate
+</ParamField>
+
+<ParamField path="t" type="numpy.ndarray" required>
+  Independent variable (time) array
+</ParamField>
+
+**Returns:** Array of derivative values df/dt
+
+## Curve Fitting
+
+### Polynomial Fitting
+
+Fit polynomial models to experimental data.
+
+```python
+import numpy as np
+
+# Quadratic fit for uniformly accelerated motion
+# Position: s = s₀ + v₀t + ½at²
+coef = np.polyfit(t, x, 2)
+
+# Extract acceleration from coefficient
+a = 2 * coef[0]  # Coefficient of t²
+
+# Generate fitted curve
+x_fit = np.polyval(coef, t)
+
+print(f"Aceleración estimada: {a:.4f} m/s^2")
+```
+
+**Source:** `analisis.py:202-203`
+
+<ParamField path="x" type="numpy.ndarray" required>
+  Independent variable (time)
+</ParamField>
+
+<ParamField path="y" type="numpy.ndarray" required>
+  Dependent variable (position)
+</ParamField>
+
+<ParamField path="deg" type="int" required>
+  Degree of fitting polynomial
+</ParamField>
+
+**Returns:** Array of polynomial coefficients from highest to lowest degree
+
+### Damped Oscillation Fit
+
+Fit exponentially damped sinusoidal function.
+
+```python
+from scipy.optimize import curve_fit
+
+def sinusoide_amortiguada(t, A, omega, phi, gamma, offset):
+    """Damped sinusoid: A·exp(-γt)·cos(ωt + φ) + offset"""
+    return A * np.exp(-gamma * t) * np.cos(omega * t + phi) + offset
+
+# Initial parameter estimates
+A0     = (np.max(y_data) - np.min(y_data)) / 2
+omega0 = 2 * np.pi / T_estimated
+p0     = [A0, omega0, 0.0, 0.05, 0.0]
+
+# Parameter bounds
+bounds = ([0, 0.5, -np.pi, 0, -0.5],
+          [2,  50, np.pi,  5,  0.5])
+
+# Perform fit
+popt, pcov = curve_fit(sinusoide_amortiguada, t_raw, y_data,
+                       p0=p0, bounds=bounds, maxfev=20000)
+
+A_fit, omega_fit, phi_fit, gamma_fit, off_fit = popt
+perr = np.sqrt(np.diag(pcov))  # Parameter uncertainties
+
+# Extract physical parameters
+T_fit = 2 * np.pi / omega_fit  # Period
+f_fit = 1.0 / T_fit            # Frequency
+omega0 = np.sqrt(omega_fit**2 + gamma_fit**2)  # Natural frequency
+k_fit = masa_kg * omega0**2    # Spring constant
+```
+
+**Source:** `Masa-Resorte/analisis.py:346-376`
+
+<ParamField path="f" type="callable" required>
+  Model function: `f(x, *params) -> y`
+</ParamField>
+
+<ParamField path="xdata" type="numpy.ndarray" required>
+  Independent variable data
+</ParamField>
+
+<ParamField path="ydata" type="numpy.ndarray" required>
+  Dependent variable data
+</ParamField>
+
+<ParamField path="p0" type="list">
+  Initial parameter guesses
+</ParamField>
+
+<ParamField path="bounds" type="tuple">
+  Parameter bounds: `(lower, upper)`
+</ParamField>
+
+<ParamField path="maxfev" type="int" default="1000">
+  Maximum function evaluations
+</ParamField>
+
+**Returns:** 
+- `popt`: Optimal parameter values
+- `pcov`: Covariance matrix (uncertainties)
+
+### Parabolic Trajectory Fit
+
+Fit projectile motion equations.
+
+```python
+from scipy.optimize import curve_fit
+
+def tray_x(t, x0, vx0):
+    """Horizontal motion: x = x₀ + vx₀·t"""
+    return x0 + vx0 * t
+
+def tray_y(t, y0, vy0, g):
+    """Vertical motion: y = y₀ + vy₀·t - ½g·t²"""
+    return y0 + vy0 * t - 0.5 * g * t**2
+
+# Fit X component (uniform motion)
+popt_x, pcov_x = curve_fit(tray_x, t_raw, x_raw, p0=[x_raw[0], vx0])
+x0_fit, vx0_fit = popt_x
+
+# Fit Y component (uniformly accelerated motion)
+popt_y, pcov_y = curve_fit(tray_y, t_raw, y_raw,
+                            p0=[y_raw[0], vy0, 9.8],
+                            bounds=([-np.inf, -50, 0], [np.inf, 50, 20]))
+y0_fit, vy0_fit, g_fit = popt_y
+
+# Calculate initial velocity and angle
+v0_fit = np.sqrt(vx0_fit**2 + vy0_fit**2)
+angulo_fit = np.degrees(np.arctan2(vy0_fit, vx0_fit))
+```
+
+**Source:** `MovimientoParabolico/analisis.py:306-336`
+
+## Frequency Analysis
+
+### Period Detection from Zero Crossings
+
+Estimate oscillation period by detecting sign changes.
+
+```python
+# Center signal around zero
+y_centrado = y_data - np.mean(y_data)
+
+# Find zero crossings
+cruces = np.where(np.diff(np.sign(y_centrado)))[0]
+
+if len(cruces) >= 2:
+    # Average time between crossings
+    T_est = 2 * np.mean(np.diff(t_raw[cruces]))
+    omega_est = 2 * np.pi / T_est if T_est > 0 else 5.0
+else:
+    omega_est = 5.0
+```
+
+**Source:** `Masa-Resorte/analisis.py:350-356`
+
+### Power Spectral Density (Welch Method)
+
+Analyze frequency content of time series data.
+
+```python
+from scipy.signal import welch, find_peaks
+
+# Calculate PSD using Welch's method
+f_psd, Pxx = welch(y_data, fs=fps, nperseg=min(256, len(y_data)//2))
+
+# Find dominant frequency
+peaks_idx, _ = find_peaks(Pxx, height=np.max(Pxx)*0.1)
+
+if len(peaks_idx) > 0:
+    f_peak = f_psd[peaks_idx[np.argmax(Pxx[peaks_idx])]]
+    print(f"Frecuencia dominante: {f_peak:.3f} Hz")
+```
+
+**Source:** `Masa-Resorte/analisis.py:497-504`
+
+<ParamField path="x" type="numpy.ndarray" required>
+  Time series data
+</ParamField>
+
+<ParamField path="fs" type="float" required>
+  Sampling frequency (Hz)
+</ParamField>
+
+<ParamField path="nperseg" type="int">
+  Length of each segment for FFT
+</ParamField>
+
+**Returns:**
+- `f`: Array of sample frequencies
+- `Pxx`: Power spectral density values
+
+### Frequency from Serial Data
+
+Detect frequency by counting zero crossings in real-time data.
+
+```python
+def _estimate_freq(self, data: np.ndarray):
+    """Simple frequency detection via ascending zero crossings."""
+    if len(data) < 10:
+        return
+    
+    # Calculate signal midpoint
+    mid = (data.max() + data.min()) / 2
+    above = data > mid
+    
+    # Find ascending crossings
+    crossings = np.where(np.diff(above.astype(np.int8)) == 1)[0]
+    
+    if len(crossings) >= 2:
+        periods = np.diff(crossings)
+        avg_period_samples = periods.mean()
+        freq = SAMPLE_RATE / avg_period_samples
+        self.lbl_freq.setText(f"{freq:.1f} Hz")
+    else:
+        self.lbl_freq.setText("< detectable")
+```
+
+**Source:** `GUIOSCI.py:514-527`
+
+## Plotting with Matplotlib
+
+### Multi-Panel Time Series Plot
+
+Create publication-quality plots with multiple subplots.
+
+```python
+import matplotlib.pyplot as plt
+
+plt.style.use('dark_background')
+
+fig, axs = plt.subplots(3, 1, figsize=(13, 10), sharex=True)
+fig.suptitle("Sistema Masa-Resorte — Cinemática", 
+             fontsize=14, fontweight='bold')
+
+# Position subplot
+axs[0].scatter(t_raw, y_data*100, s=4, alpha=0.4, 
+               color='#00BFFF', label='Datos')
+axs[0].plot(t_raw, y_s*100, lw=1.5, color='#00BFFF', 
+            label='Suavizado')
+axs[0].set_ylabel("y (cm)")
+axs[0].legend(fontsize=8)
+axs[0].grid(alpha=0.25)
+
+# Velocity subplot
+axs[1].plot(t_raw, vy*100, lw=1.8, color='#7FFF00')
+axs[1].axhline(0, color='gray', lw=0.6, linestyle=':')
+axs[1].set_ylabel("vy (cm/s)")
+axs[1].grid(alpha=0.25)
+
+# Acceleration subplot
+axs[2].plot(t_raw, ay*100, lw=1.8, color='#FF6347')
+axs[2].set_ylabel("ay (cm/s²)")
+axs[2].set_xlabel("t (s)")
+axs[2].grid(alpha=0.25)
+
+fig.tight_layout()
+fig.savefig("cinematica.png", dpi=150, bbox_inches='tight')
+```
+
+**Source:** `Masa-Resorte/analisis.py:444-473`
+
+### Phase Space Diagram
+
+Plot velocity vs position with time colormap.
+
+```python
+fig, ax = plt.subplots(figsize=(7, 7))
+fig.suptitle("Espacio de Fases (y, vy)", fontsize=14, fontweight='bold')
+
+# Scatter plot colored by time
+sc = ax.scatter(y_data*100, vy*100, c=t_raw, cmap='plasma', 
+                s=10, alpha=0.8)
+plt.colorbar(sc, ax=ax, label='t (s)')
+
+ax.set_xlabel("Desplazamiento y (cm)")
+ax.set_ylabel("Velocidad vy (cm/s)")
+ax.axhline(0, color='gray', lw=0.5, linestyle=':')
+ax.axvline(0, color='gray', lw=0.5, linestyle=':')
+ax.grid(alpha=0.25)
+
+fig.savefig("espacio_fases.png", dpi=150, bbox_inches='tight')
+```
+
+**Source:** `Masa-Resorte/analisis.py:478-489`
+
+### Bode Plot (Transfer Function)
+
+Plot magnitude and phase response.
+
+```python
+fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+fig.suptitle("Diagrama de Bode  H(s)=1/(ms²+cs+k)", 
+             fontsize=13, fontweight='bold')
+
+# Calculate transfer function
+omega_range = np.logspace(-1, 2, 1000)  # rad/s
+s_vals = 1j * omega_range
+H_vals = 1.0 / (masa_kg * s_vals**2 + c_fit * s_vals + k_fit)
+
+# Magnitude plot
+H_mag_dB = 20 * np.log10(np.abs(H_vals))
+ax1.semilogx(omega_range, H_mag_dB, color='#00BFFF', lw=2)
+ax1.axvline(omega0, color='white', lw=1.2, linestyle='--', 
+            label=f'ω₀={omega0:.3f} rad/s')
+ax1.set_ylabel("|H(jω)| (dB)")
+ax1.legend(fontsize=9)
+ax1.grid(alpha=0.25, which='both')
+
+# Phase plot
+H_fase_deg = np.degrees(np.angle(H_vals))
+ax2.semilogx(omega_range, H_fase_deg, color='#FF6347', lw=2)
+ax2.set_ylabel("∠H(jω) (°)")
+ax2.set_xlabel("ω (rad/s)")
+ax2.grid(alpha=0.25, which='both')
+
+fig.savefig("bode.png", dpi=150, bbox_inches='tight')
+```
+
+**Source:** `Masa-Resorte/analisis.py:516-543`
+
+### Histogram Distribution
+
+Visualize measurement distributions.
+
+```python
+plt.figure(figsize=(8, 8))
+
+# Time distribution
+plt.subplot(2, 1, 1)
+plt.hist(times, bins=10)
+plt.xlabel("Tiempo de caída (s)")
+plt.ylabel("Frecuencia")
+plt.title("Distribución de tiempos de caída")
+
+# g value distribution
+plt.subplot(2, 1, 2)
+plt.hist(g_values, bins=10)
+plt.xlabel("Aceleración g (m/s²)")
+plt.ylabel("Frecuencia")
+plt.title("Distribución de valores de g")
+
+plt.tight_layout()
+plt.show()
+```
+
+**Source:** `procesar.py:53-70`
+
+## Data Export
+
+### Save Processed Data
+
+Export analysis results with metadata header.
+
+```python
+# Save data with descriptive header
+header = (
+    "t(s)  x(m)  y(m)  y_desp(m)  vx(m/s)  vy(m/s)  ax(m/s2)  ay(m/s2)\n"
+    f"# k={k_fit:.4f} N/m  c={c_fit:.6f} N·s/m  "
+    f"omega0={omega0:.4f} rad/s  zeta={zeta:.4f}"
+)
+
+np.savetxt("datos_masa_resorte.txt",
+           np.column_stack((t_raw, x_data, y_raw, y_data, 
+                           vx, vy, ax, ay)),
+           header=header)
+```
+
+**Source:** `Masa-Resorte/analisis.py:431-436`
+
+### Simple Data Export
+
+Save position vs time data.
+
+```python
+np.savetxt("posicion_vs_tiempo.txt", datos,
+           header="t(s) x(m) y(m)")
+```
+
+**Source:** `analisis.py:191-192`
+
+## System Identification
+
+### Calculate System Parameters
+
+Extract physical parameters from fitted oscillation.
+
+```python
+# Spring-mass-damper system parameters
+masa_kg = 0.150  # kg
+
+# From fitted sinusoid
+omega_fit = popt[1]    # Damped angular frequency
+gamma_fit = popt[3]    # Damping coefficient
+
+# Natural frequency: ω₀ = sqrt(ω² + γ²)
+omega0 = np.sqrt(omega_fit**2 + gamma_fit**2)
+
+# Spring constant: k = m·ω₀²
+k_fit = masa_kg * omega0**2
+
+# Damping coefficient: c = 2·m·γ
+c_fit = 2 * masa_kg * gamma_fit
+
+# Damping ratio: ζ = γ/ω₀
+zeta = gamma_fit / omega0
+
+# Period and frequency
+T_fit = 2 * np.pi / omega_fit
+f_fit = 1.0 / T_fit
+
+print(f"Constante resorte k: {k_fit:.4f} N/m")
+print(f"Coef. amort. c: {c_fit:.6f} N·s/m")
+print(f"Razón amort. ζ: {zeta:.4f}")
+```
+
+**Source:** `Masa-Resorte/analisis.py:370-392`
+
+## Best Practices
+
+### Handle Missing Data
+
+Check for valid data before analysis:
+
+```python
+if len(datos) == 0:
+    print("No se detectaron datos. Revisa los filtros.")
+    exit()
+```
+
+### Suppress Warnings
+
+Filter scipy optimization warnings:
+
+```python
+import warnings
+warnings.filterwarnings('ignore')
+```
+
+**Source:** `Masa-Resorte/analisis.py:7`
+
+### Parameter Bounds
+
+Always provide reasonable bounds for curve fitting:
+
+```python
+# Good: constrained parameters
+bounds = ([0, 0.5, -np.pi, 0, -0.5],  # lower bounds
+          [2,  50,  np.pi, 5,  0.5])  # upper bounds
+
+popt, pcov = curve_fit(model, x, y, p0=p0, bounds=bounds)
+```
+
+**Source:** `Masa-Resorte/analisis.py:360-361`

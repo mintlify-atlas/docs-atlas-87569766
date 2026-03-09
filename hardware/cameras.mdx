@@ -1,0 +1,531 @@
+---
+title: Cameras
+description: Webcam configuration and usage for computer vision experiments
+---
+
+## Overview
+
+PhysisLab uses standard USB webcams with OpenCV for computer vision-based physics experiments including free fall tracking, pendulum analysis, projectile motion, and mass-spring systems.
+
+## Supported Cameras
+
+- **Standard USB Webcams** (720p or 1080p recommended)
+- **Logitech C270/C920** (tested and verified)
+- **Generic UVC-compatible webcams**
+- **Laptop built-in cameras** (with adjustable settings)
+
+## Camera Specifications
+
+### Recommended Specifications
+
+- **Resolution**: 640x480 (VGA) to 1920x1080 (Full HD)
+- **Frame Rate**: 30 FPS minimum, 60 FPS preferred for fast motion
+- **Interface**: USB 2.0 or higher
+- **Focus**: Manual focus recommended for consistent tracking
+- **Exposure**: Manual exposure control for stable lighting
+
+### Common Resolutions Used
+
+From `FreeFallCam.py:10`:
+
+```python
+RESOLUTION = (320, 240)  # (width, height) - Low resolution for higher FPS
+```
+
+Typical configurations:
+- **320x240**: Maximum FPS, lower precision
+- **640x480**: Balanced performance and accuracy
+- **1280x720**: High accuracy, moderate FPS
+- **1920x1080**: Maximum accuracy, lower FPS
+
+## Camera Initialization
+
+### Basic Setup with OpenCV
+
+From `FreeFallCam.py:31-43`:
+
+```python
+import cv2
+
+# Initialize camera
+cap = cv2.VideoCapture(0)  # 0 for first camera
+
+# Configure resolution
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, RESOLUTION[0])
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, RESOLUTION[1])
+
+# Configure FPS
+DESIRED_FPS = 10
+cap.set(cv2.CAP_PROP_FPS, DESIRED_FPS)
+
+# Get actual FPS from camera
+fps_from_cap = cap.get(cv2.CAP_PROP_FPS)
+if fps_from_cap == 0:
+    fps_from_cap = DESIRED_FPS
+```
+
+### FPS Measurement and Verification
+
+From `FreeFallCam.py:45-57`:
+
+```python
+# Measure actual FPS with test frames
+num_test_frames = 60
+start = time.time()
+for i in range(num_test_frames):
+    ret, frame = cap.read()
+end = time.time()
+measured_fps = num_test_frames / (end - start)
+
+real_fps = min(fps_from_cap, measured_fps)
+print(f"FPS deseado: {DESIRED_FPS}")
+print(f"FPS detectado desde cámara: {fps_from_cap}")
+print(f"FPS medido: {measured_fps:.2f}")
+print(f"FPS final usado para cálculos: {real_fps:.2f}")
+```
+
+<Tip>
+Always verify the actual camera FPS by measurement, as many cameras don't achieve their advertised frame rates in practice.
+</Tip>
+
+## Color-Based Object Tracking
+
+### HSV Color Space Selection
+
+From `capturar.py:8`:
+
+```python
+tolerance = np.array([10, 60, 60])  # tolerancia HSV
+```
+
+PhysisLab uses HSV (Hue, Saturation, Value) color space for robust object detection:
+
+- **Hue**: Color type (0-179 in OpenCV)
+- **Saturation**: Color intensity (0-255)
+- **Value**: Brightness (0-255)
+
+### Interactive Color Calibration
+
+From `FreeFallCam.py:78-92`:
+
+```python
+# Capture snapshot
+while True:
+    ret, frame = cap.read()
+    cv2.imshow("Camara - ESPACIO para capturar", frame)
+    
+    key = cv2.waitKey(1) & 0xFF
+    if key == 32:  # SPACE key
+        snapshot = frame.copy()
+        break
+
+# Select ROI (Region of Interest)
+roi = cv2.selectROI("Selecciona region del objeto", snapshot, False, False)
+x, y, w, h = roi
+selected_region = snapshot[y:y+h, x:x+w]
+
+# Calculate mean HSV color
+hsv_region = cv2.cvtColor(selected_region, cv2.COLOR_BGR2HSV)
+mean_hsv = np.mean(hsv_region.reshape(-1, 3), axis=0).astype(int)
+
+# Create color range
+lower_color = np.clip(mean_hsv - tolerance, 0, 255)
+upper_color = np.clip(mean_hsv + tolerance, 0, 255)
+```
+
+### Object Detection Pipeline
+
+From `FreeFallCam.py:136-157`:
+
+```python
+# Convert frame to HSV
+hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+# Create binary mask
+mask = cv2.inRange(hsv, lower_color, upper_color)
+
+# Morphological operations to clean up mask
+kernel = np.ones((5,5), np.uint8)
+mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+mask = cv2.morphologyEx(mask, cv2.MORPH_DILATE, kernel)
+
+# Find contours
+contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+if contours:
+    # Get largest contour
+    c = max(contours, key=cv2.contourArea)
+    
+    if cv2.contourArea(c) > 300:  # Minimum area threshold
+        # Calculate centroid
+        M = cv2.moments(c)
+        if M["m00"] != 0:
+            cx = int(M["m10"] / M["m00"])
+            cy = int(M["m01"] / M["m00"])
+            
+            cv2.circle(frame, (cx, cy), 6, (0,255,0), -1)
+```
+
+## Time-of-Flight Measurement
+
+### Frame-Based Timing
+
+From `FreeFallCam.py:161-172`:
+
+```python
+state = "WAIT_START"
+frame_count = 0
+frame_start = 0
+
+# Detect line crossing
+if state == "WAIT_START":
+    if prev_cy < y_start_line and cy >= y_start_line:
+        frame_start = frame_count
+        state = "WAIT_END"
+        print("Inicio en frame:", frame_start)
+
+elif state == "WAIT_END":
+    if prev_cy < y_end_line and cy >= y_end_line:
+        frame_end = frame_count
+        delta_frames = frame_end - frame_start
+        delta_t = delta_frames / real_fps
+        
+        print(f"Δt = {delta_t:.6f} s")
+```
+
+### High-Precision Timing (time.perf_counter)
+
+From `capturar.py:98-114`:
+
+```python
+current_time = time.perf_counter()
+
+# Detect start line crossing
+if state == "WAIT_START":
+    if prev_cy < y_start_line and cy >= y_start_line:
+        t_start = current_time
+        state = "WAIT_END"
+        print("Inicio detectado")
+
+# Detect end line crossing
+elif state == "WAIT_END":
+    if prev_cy < y_end_line and cy >= y_end_line:
+        t_end = current_time
+        delta_t = t_end - t_start
+        print(f"Fin detectado - Δt = {delta_t:.6f} s")
+        state = "DONE"
+```
+
+<Note>
+`time.perf_counter()` provides higher precision than frame counting but is limited by camera's actual frame rate.
+</Note>
+
+## Video Analysis
+
+### Frame Selection and Tracking
+
+From `analisis.py:29-80`:
+
+```python
+# Open video file
+cap = cv2.VideoCapture(video_path)
+
+fps = cap.get(cv2.CAP_PROP_FPS)
+total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+print(f"FPS detectado: {fps}")
+print(f"Total frames: {total_frames}")
+
+# Frame selection interface
+frame_actual = 0
+frame_inicio = None
+frame_fin = None
+
+while True:
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_actual)
+    ret, frame = cap.read()
+    
+    cv2.imshow("Seleccion Frames", frame)
+    key = cv2.waitKey(0)
+    
+    if key == ord('d'):  # Next frame
+        frame_actual = min(frame_actual + 1, total_frames - 1)
+    elif key == ord('a'):  # Previous frame
+        frame_actual = max(frame_actual - 1, 0)
+    elif key == ord('i'):  # Mark start
+        frame_inicio = frame_actual
+    elif key == ord('f'):  # Mark end
+        frame_fin = frame_actual
+    elif key == 13:  # Enter to confirm
+        if frame_inicio is not None and frame_fin is not None:
+            break
+```
+
+### Pixel-to-Meter Calibration
+
+From `analisis.py:105-136`:
+
+```python
+distancia_real_m = 0.7   # Known distance in meters
+
+# Click two reference points
+puntos = []
+
+def click(event, x, y, flags, param):
+    global puntos
+    if event == cv2.EVENT_LBUTTONDOWN:
+        puntos.append((x,y))
+        print(f"Punto: {x},{y}")
+
+cv2.setMouseCallback("Calibracion", click)
+
+while len(puntos) < 2:
+    cv2.imshow("Calibracion", frame)
+    cv2.waitKey(1)
+
+# Calculate scale factor
+dist_px = np.linalg.norm(np.array(puntos[0]) - np.array(puntos[1]))
+escala = distancia_real_m / dist_px
+
+print(f"Escala calculada: {escala} m/pixel")
+```
+
+### Position Tracking Over Time
+
+From `analisis.py:141-183`:
+
+```python
+cap.set(cv2.CAP_PROP_POS_FRAMES, frame_inicio)
+frame_num = frame_inicio
+
+datos = []
+
+while frame_num <= frame_fin:
+    ret, frame = cap.read()
+    if not ret:
+        break
+    
+    # Detect object
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, hsv_lower, hsv_upper)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5,5),np.uint8))
+    
+    contornos, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if contornos:
+        c = max(contornos, key=cv2.contourArea)
+        M = cv2.moments(c)
+        
+        if M["m00"] != 0:
+            cx = int(M["m10"]/M["m00"])
+            cy = int(M["m01"]/M["m00"])
+            
+            # Convert to meters
+            x_m = cx * escala
+            y_m = cy * escala
+            
+            # Calculate time
+            tiempo = (frame_num - frame_inicio) / fps
+            
+            datos.append((tiempo, x_m, y_m))
+    
+    frame_num += 1
+
+# Save data
+np.savetxt("posicion_vs_tiempo.txt", datos, header="t(s) x(m) y(m)")
+```
+
+## Camera Positioning and Setup
+
+### Free Fall Experiment
+
+```
+┌─────────────┐
+│   Camera    │  ← Mount camera perpendicular to fall path
+└─────────────┘
+       ↓
+       ↓ (viewing direction)
+       ↓
+    ┌──┴──┐
+    │     │
+    │  ●  │  ← Falling object (bright color)
+    │     │
+    └─────┘
+    Vertical drop zone
+```
+
+**Setup Requirements**:
+- Camera perpendicular to motion plane
+- Uniform background (contrasting with object)
+- Even lighting (avoid shadows)
+- Stable mount (no vibrations)
+- Mark reference lines clearly
+
+### Pendulum/Projectile Motion
+
+```
+    ┌─────────────┐
+    │   Camera    │  ← Mount at motion plane level
+    └─────────────┘
+           |
+           |  (side view)
+           ↓
+        ────────  ← Motion plane
+```
+
+**Setup Requirements**:
+- Camera at same height as motion
+- Maximum field of view for full trajectory
+- Place calibration scale in frame
+- Lock camera focus and exposure
+
+## Lighting Recommendations
+
+### Best Practices
+
+1. **Diffuse Lighting**: Use soft, even illumination
+   - Avoid direct sunlight (creates harsh shadows)
+   - Use LED panels or diffused lamps
+
+2. **Backlighting**: For silhouette tracking
+   - Place light source behind object
+   - Creates high contrast for easy detection
+
+3. **Avoid Flicker**: 
+   - Use DC-powered LED lights
+   - Avoid fluorescent lights (50/60 Hz flicker)
+
+4. **Manual Exposure**:
+   ```python
+   cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Manual mode
+   cap.set(cv2.CAP_PROP_EXPOSURE, -6)         # Set exposure value
+   ```
+
+## Object Markers
+
+### Recommended Markers
+
+- **Bright Colors**: Red, orange, yellow, green (high saturation)
+- **Size**: 2-5 cm diameter for 640x480 resolution
+- **Shape**: Circular for consistent centroid
+- **Contrast**: High contrast against background
+
+### Color Selection Guide
+
+**Best Colors for Tracking**:
+1. **Orange**: High visibility, easy HSV separation
+2. **Yellow**: Good in most lighting
+3. **Green**: Works well against white/gray backgrounds
+4. **Red**: High contrast, but wraps at H=0/180 in HSV
+
+**Avoid**:
+- White/black (sensitive to lighting changes)
+- Blue (similar to many backgrounds)
+- Skin tones (similar to hands)
+
+## Performance Optimization
+
+### Resolution vs. Frame Rate Trade-off
+
+From `FreeFallCam.py:9-10`:
+
+```python
+DESIRED_FPS = 10
+RESOLUTION = (320, 240)  # Lower resolution = higher FPS
+```
+
+**Guidelines**:
+- **Slow motion** (less than 1 m/s): 10-15 FPS, high resolution (640x480+)
+- **Moderate motion** (1-5 m/s): 30 FPS, medium resolution (640x480)
+- **Fast motion** (greater than 5 m/s): 60+ FPS, low resolution (320x240)
+
+### Reduce Processing Load
+
+```python
+# Reduce frame size for processing
+small_frame = cv2.resize(frame, (320, 240))
+
+# Process on small frame
+hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
+mask = cv2.inRange(hsv, lower_color, upper_color)
+
+# Scale coordinates back to original
+cx_full = cx * (original_width / 320)
+cy_full = cy * (original_height / 240)
+```
+
+### Skip Frame Processing
+
+```python
+process_every_n_frames = 2
+frame_count = 0
+
+while True:
+    ret, frame = cap.read()
+    frame_count += 1
+    
+    if frame_count % process_every_n_frames == 0:
+        # Process this frame
+        process_frame(frame)
+```
+
+## Troubleshooting
+
+### Camera Not Detected
+
+```python
+# Try different camera indices
+for i in range(5):
+    cap = cv2.VideoCapture(i)
+    if cap.isOpened():
+        print(f"Camera found at index {i}")
+        break
+    cap.release()
+```
+
+### Low Frame Rate
+
+1. Reduce resolution
+2. Close other applications using camera
+3. Use MJPEG codec: `cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))`
+4. Disable auto-focus: `cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)`
+
+### Poor Object Detection
+
+1. **Adjust HSV tolerance**: Increase tolerance values
+2. **Improve lighting**: Add more diffuse light
+3. **Clean background**: Remove objects with similar colors
+4. **Increase object size**: Use larger, brighter marker
+5. **Tune morphological operations**:
+   ```python
+   # Larger kernel for more aggressive filtering
+   kernel = np.ones((7,7), np.uint8)
+   ```
+
+### Jittery Position Tracking
+
+1. **Apply smoothing filter**:
+   ```python
+   from scipy.ndimage import gaussian_filter1d
+   
+   positions_smooth = gaussian_filter1d(positions, sigma=2)
+   ```
+
+2. **Increase minimum contour area**:
+   ```python
+   if cv2.contourArea(c) > 500:  # Increase from 300
+   ```
+
+3. **Use temporal filtering**:
+   ```python
+   # Exponential moving average
+   alpha = 0.3
+   cx_filtered = alpha * cx + (1 - alpha) * cx_prev
+   ```
+
+## Related Documentation
+
+- [Free Fall Experiment](/experiments/free-fall)
+- [Pendulum Experiment](/experiments/pendulum)
+- [Projectile Motion](/experiments/projectile-motion)
+- [OpenCV Python Guide](https://docs.opencv.org/4.x/d6/d00/tutorial_py_root.html)

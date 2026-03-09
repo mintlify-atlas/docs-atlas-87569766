@@ -1,0 +1,305 @@
+---
+title: Requirements
+description: Hardware and software requirements for PhysisLab experiments
+---
+
+## Overview
+
+PhysisLab experiments can be performed with varying levels of equipment depending on which measurement approach you choose. This page outlines all requirements organized by experiment type and methodology.
+
+## Software Requirements
+
+### Python Environment
+
+All camera-based and audio-based experiments require Python with scientific computing libraries:
+
+- **Python**: Version 3.7 or higher (3.8+ recommended)
+- **Operating System**: Windows, macOS, or Linux
+
+### Required Python Libraries
+
+The following libraries are used across different experiments:
+
+#### Core Computer Vision
+```python
+import cv2              # OpenCV for image processing and tracking
+import numpy as np      # Numerical computing and arrays
+```
+
+#### Scientific Computing & Analysis
+```python
+import matplotlib.pyplot as plt      # Plotting and visualization
+from scipy.optimize import curve_fit # Curve fitting (sinusoidal, parabolic)
+from scipy.signal import welch, find_peaks  # Signal processing and spectral analysis
+```
+
+#### Audio Processing (Sound-Based Experiments)
+```python
+import sounddevice as sd  # Real-time audio I/O
+import time               # High-precision timing
+```
+
+#### GUI Applications (Oscilloscope/Signal Generator)
+```python
+import tkinter           # GUI framework (or PyQt/customtkinter)
+import serial            # Serial communication with ESP32
+import websocket         # WebSocket communication (optional)
+```
+
+<Note>
+A complete `requirements.txt` file will be provided in the installation guide. Install all dependencies with:
+```bash
+pip install opencv-python numpy scipy matplotlib sounddevice pyserial
+```
+</Note>
+
+### Arduino IDE or PlatformIO
+
+For microcontroller-based experiments:
+
+- **Arduino IDE**: Version 2.0+ (recommended) or 1.8.19+
+- **Alternative**: PlatformIO (for advanced users)
+- **ESP32 Board Support**: Arduino core for ESP32
+
+## Hardware Requirements
+
+### Option 1: Camera-Based Experiments (Recommended for Beginners)
+
+<Card title="Minimum Hardware" icon="camera">
+  For free fall, pendulum, spring-mass, projectile motion, and kinematics experiments using computer vision.
+</Card>
+
+#### Essential Components
+
+| Component | Specification | Purpose |
+|-----------|--------------|----------|
+| **Webcam** | USB webcam, 30 fps minimum (60 fps preferred), 720p or higher | Object tracking and motion capture |
+| **Computer** | Windows/Mac/Linux with USB port, 4GB RAM minimum | Running Python scripts and analysis |
+| **Colored Objects** | High-saturation colors (orange, yellow, pink, green) | Easy HSV color detection and tracking |
+| **Reference Markers** | Triangular or rectangular colored markers | Homography calibration for pixel-to-meter conversion |
+| **Good Lighting** | Uniform lighting, avoid shadows and backlighting | Consistent color detection |
+
+#### Experiment-Specific Hardware
+
+**Free Fall**
+- Small colored ball (ping pong ball or similar)
+- Measuring tape to calibrate distance
+- Height: 1-2 meters recommended
+
+**Pendulum**
+- String or fishing line (low mass, non-elastic)
+- Colored pendulum bob (20-100g mass)
+- Fixed pivot point (hook, stand)
+- Measuring tape for length calibration (0.5-1.5m lengths work well)
+
+**Spring-Mass System**
+- Helical spring (k ≈ 1-10 N/m for visible oscillations)
+- Known mass (50-500g)
+- 3 colored markers forming isosceles triangle for calibration
+- Vertical support frame
+
+**Projectile Motion**
+- Launcher (manual or mechanical)
+- Projectile with colored marker
+- 4 colored markers forming rectangle for homography
+- Launch angles 20-70° recommended
+
+**Kinematics (Camera)**
+- Moving colored object
+- Linear track or guided motion (optional)
+- Reference markers for calibration
+
+#### Camera Resolution & Frame Rate Guidelines
+
+<Warning>
+Higher frame rates are critical for fast-moving experiments:
+- **Free fall**: 30 fps minimum, 60 fps recommended
+- **Projectile motion**: 60 fps strongly recommended
+- **Pendulum & spring-mass**: 30 fps sufficient
+- **Slow kinematics**: 15-30 fps sufficient
+</Warning>
+
+The code automatically measures actual camera FPS:
+```python
+# From FreeFallCam.py - automatic FPS detection
+fps_from_cap = cap.get(cv2.CAP_PROP_FPS)
+num_test_frames = 60
+start = time.time()
+for i in range(num_test_frames):
+    ret, frame = cap.read()
+end = time.time()
+measured_fps = num_test_frames / (end - start)
+real_fps = min(fps_from_cap, measured_fps)
+```
+
+### Option 2: Microcontroller-Based Experiments
+
+<Card title="ESP32 Setup" icon="microchip">
+  For high-precision timing and sensor-based measurements.
+</Card>
+
+#### Essential Components
+
+| Component | Specification | Where to Buy |
+|-----------|--------------|---------------|
+| **ESP32 Dev Board** | ESP32-WROOM-32 or ESP32-DevKitC, 240MHz dual-core | Amazon, AliExpress, local electronics |
+| **USB Cable** | Micro-USB or USB-C (depending on board) | Included with most boards |
+| **Breadboard** | 830 points minimum | Electronics suppliers |
+| **Jumper Wires** | Male-to-male and male-to-female assortment | Electronics suppliers |
+| **Power Supply** | 5V via USB (500mA minimum) | USB power adapter or computer USB |
+
+#### Experiment-Specific Sensors
+
+**Free Fall Timing**
+
+Two approaches available:
+
+<Tabs>
+  <Tab title="IR Sensor Approach">
+    - **2x IR Break Beam Sensors**: Transmitter + receiver pairs
+    - **Pins Used**: GPIO 18 (start), GPIO 5 (end)
+    - **Resolution**: Microsecond timing precision
+    - **Range**: 5-30 cm beam distance
+    - **Cost**: ~$5-10 per pair
+  </Tab>
+  
+  <Tab title="Accelerometer Approach">
+    - **3x Accelerometer modules**: MPU6050 or ADXL345
+    - **Communication**: I2C (SDA/SCL)
+    - **Purpose**: Direct acceleration measurement during fall
+    - **Resolution**: 16-bit ADC
+    - **Cost**: ~$3-8 each
+  </Tab>
+</Tabs>
+
+**Kinematics (Distance Sensors)**
+
+<Tabs>
+  <Tab title="VL53L0X Time-of-Flight">
+    - **Sensor**: Adafruit VL53L0X or compatible
+    - **Range**: 5-200 cm accurate measurement
+    - **Interface**: I2C (pins 21=SDA, 22=SCL)
+    - **Interrupt Pin**: GPIO 27
+    - **Update Rate**: ~5 Hz (200ms intervals)
+    - **Library**: `Adafruit_VL53L0X`
+    - **Advantages**: High accuracy, not affected by object color
+    - **Cost**: ~$15
+  </Tab>
+  
+  <Tab title="HC-SR04 Ultrasonic">
+    - **Sensor**: HC-SR04 ultrasonic distance sensor
+    - **Range**: 2-400 cm
+    - **Pins**: Trigger + Echo pins
+    - **Update Rate**: ~10 Hz
+    - **Advantages**: Low cost, longer range
+    - **Limitations**: Affected by temperature, requires flat surface
+    - **Cost**: ~$2-5
+  </Tab>
+</Tabs>
+
+Both sensor approaches include advanced filtering:
+- Exponential Moving Average (EMA)
+- 2nd-order Butterworth low-pass filter
+- α-β filter for position and velocity estimation
+
+#### Arduino Libraries Required
+
+```cpp
+#include <Arduino.h>           // Core Arduino functions
+#include <Wire.h>              // I2C communication
+#include <Adafruit_VL53L0X.h> // VL53L0X sensor (if using ToF)
+#include "driver/dac.h"        // ESP32 DAC (oscilloscope/generator)
+```
+
+Install via Arduino Library Manager:
+- **Adafruit VL53L0X** (for kinematics with ToF sensor)
+- **ESP32 board definitions** (via Boards Manager)
+
+### Option 3: Audio-Based Experiments
+
+<Card title="Sound Detection Setup" icon="volume-high">
+  For free fall experiments using acoustic impact detection.
+</Card>
+
+#### Required Hardware
+
+| Component | Specification | Notes |
+|-----------|--------------|--------|
+| **Computer** | Any with audio input | Built-in mic often sufficient |
+| **Microphone** | 3.5mm jack or USB mic | Headphones with mic work well |
+| **Sound Source** | Bouncing ball or dropping object | Should create clear impact sounds |
+| **Quiet Environment** | Low background noise | Critical for threshold detection |
+
+#### Audio Setup Parameters
+
+```python
+SAMPLE_RATE = 44100      # Standard audio sample rate
+BLOCK_SIZE = 8           # Small buffer for low latency
+THRESHOLD = 0.65         # RMS threshold for event detection
+DEVICE_INDEX = 0         # Audio input device
+```
+
+The system includes:
+- Real-time RMS level monitoring
+- Latency compensation (estimated from block size)
+- Visual feedback during measurement
+- Accept/reject interface for data quality control
+
+<Tip>
+Test your microphone sensitivity before experiments:
+```python
+device_info = sd.query_devices(DEVICE_INDEX)
+print(f"Using: {device_info['name']}")
+```
+Adjust `THRESHOLD` based on ambient noise levels.
+</Tip>
+
+### Bonus: Oscilloscope & Signal Generator
+
+<Card title="Lab Instrument Setup" icon="wave-square">
+  Build a dual-channel oscilloscope and arbitrary waveform generator.
+</Card>
+
+#### Hardware Requirements
+
+| Component | Pin Connections | Function |
+|-----------|----------------|----------|
+| **ESP32** | Standard dev board | Core processor |
+| **DAC Outputs** | GPIO 25 (CH1), GPIO 26 (CH2) | Signal generation (0-3.3V) |
+| **ADC Inputs** | GPIO 34 (CH1), GPIO 35 (CH2) | Signal measurement |
+| **USB Connection** | Via built-in USB | Serial communication at 115200 baud |
+
+#### Optional: WebSocket Mode
+
+- **WiFi Connection**: ESP32 connects to local network
+- **Communication**: WebSocket protocol for lower latency
+- **Advantages**: Wireless operation, potentially faster streaming
+
+#### Capabilities
+
+**Signal Generator:**
+- Waveforms: Sine, square, triangle, sawtooth, DC
+- Frequency range: 0.1 Hz - 10 kHz
+- Amplitude control: 0-255 (8-bit DAC)
+- Offset control: 0-255
+- Sample rate: 40 kHz
+- Independent dual channels
+
+**Oscilloscope:**
+- Dual ADC channels (12-bit)
+- Sample rate: 200 samples/second (configurable)
+- Input range: 0-3.3V
+- Real-time streaming via serial
+- Python GUI with FFT analysis
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation Guide" icon="download" href="/installation">
+    Follow step-by-step instructions to install all required software
+  </Card>
+  
+  <Card title="Choose Your First Experiment" icon="flask" href="/experiments/freefall">
+    Start with a simple free fall experiment
+  </Card>
+</CardGroup>

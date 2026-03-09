@@ -1,0 +1,269 @@
+---
+title: Free Fall Timer Firmware
+description: Arduino firmware for measuring free fall time using PIR sensors and hardware interrupts
+---
+
+## Overview
+
+The Free Fall Timer firmware measures the time interval between two PIR (Passive Infrared) sensors detecting an object in free fall. It uses hardware interrupts for precise timing and supports both Arduino (ATmega328) and ESP32 platforms.
+
+## Pin Configuration
+
+### Arduino Version
+
+```cpp
+#define PIN_INICIO 2   // INT0 - Start sensor
+#define PIN_FIN    3   // INT1 - End sensor
+```
+
+### ESP32 Version
+
+```cpp
+#define PIN_INICIO 18  // Start sensor
+#define PIN_FIN    26  // End sensor (safe pin)
+```
+
+## Hardware Timer Configuration
+
+The Arduino version uses Timer1 configured for 1ms interrupts:
+
+```cpp
+// Timer1 Configuration (1ms interrupts)
+noInterrupts();
+TCCR1A = 0;
+TCCR1B = 0;
+TCNT1  = 0;
+
+OCR1A = 249;                          // 250 ticks → 1 ms
+TCCR1B |= (1 << WGM12);               // CTC mode
+TCCR1B |= (1 << CS11) | (1 << CS10); // Prescaler 64
+TIMSK1 |= (1 << OCIE1A);              // Enable interrupt
+
+interrupts();
+```
+
+### Timer ISR
+
+```cpp
+ISR(TIMER1_COMPA_vect) {
+  contadorMs++;  // Increment every 1ms
+}
+```
+
+## State Machine
+
+The firmware uses a state-based approach with volatile flags:
+
+```cpp
+volatile bool esperandoInicio = true;  // Waiting for start
+volatile bool esperandoFin = false;    // Waiting for end
+volatile bool datoListo = false;       // Data ready flag
+volatile unsigned long contadorMs = 0; // Millisecond counter
+```
+
+## Interrupt Service Routines
+
+### Start Sensor ISR (Arduino)
+
+```cpp
+void isrInicio() {
+  if (esperandoInicio) {
+    noInterrupts();
+    contadorMs = 0;              // Reset counter
+    esperandoInicio = false;
+    esperandoFin = true;
+    interrupts();
+  }
+}
+```
+
+### End Sensor ISR (Arduino)
+
+```cpp
+void isrFin() {
+  if (esperandoFin) {
+    noInterrupts();
+    esperandoFin = false;
+    esperandoInicio = true;
+    datoListo = true;            // Mark data ready
+    interrupts();
+  }
+}
+```
+
+### ESP32 ISRs with FreeRTOS
+
+The ESP32 version uses FreeRTOS critical sections:
+
+```cpp
+portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+
+void IRAM_ATTR isrInicio() {
+  portENTER_CRITICAL_ISR(&mux);
+  
+  if (esperandoInicio) {
+    tInicio = millis();
+    esperandoInicio = false;
+    esperandoFin = true;
+  }
+  
+  portEXIT_CRITICAL_ISR(&mux);
+}
+
+void IRAM_ATTR isrFin() {
+  portENTER_CRITICAL_ISR(&mux);
+  
+  if (esperandoFin) {
+    tFin = millis();
+    delta = tFin - tInicio;
+    esperandoFin = false;
+    esperandoInicio = true;
+    datoListo = true;
+  }
+  
+  portEXIT_CRITICAL_ISR(&mux);
+}
+```
+
+## Setup Function
+
+```cpp
+void setup() {
+  Serial.begin(115200);
+  
+  // Configure input pins with pull-up resistors
+  pinMode(PIN_INICIO, INPUT_PULLUP);
+  pinMode(PIN_FIN, INPUT_PULLUP);
+  
+  // Configure Timer1 (Arduino only)
+  noInterrupts();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1  = 0;
+  OCR1A = 249;
+  TCCR1B |= (1 << WGM12);
+  TCCR1B |= (1 << CS11) | (1 << CS10);
+  TIMSK1 |= (1 << OCIE1A);
+  interrupts();
+  
+  // Attach interrupts on FALLING edge
+  attachInterrupt(digitalPinToInterrupt(PIN_INICIO), isrInicio, FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_FIN), isrFin, FALLING);
+  
+  Serial.println("Sistema listo: Arduino + Timer 1 ms");
+  Serial.println("Esperando INICIO...");
+}
+```
+
+## Main Loop
+
+```cpp
+void loop() {
+  if (datoListo) {
+    noInterrupts();
+    unsigned long tiempoMs = contadorMs;
+    datoListo = false;
+    interrupts();
+    
+    Serial.print("TIEMPO = ");
+    Serial.print(tiempoMs);
+    Serial.println(" ms");
+    Serial.println("------------------");
+  }
+}
+```
+
+## Serial Output Format
+
+### Arduino Version
+
+```
+TIEMPO = 450 ms
+------------------
+```
+
+### ESP32 Version
+
+```
+INICIO: 1234567 us
+FIN: 1685567 us
+DELTA = 451000 us
+----------------------
+```
+
+## Three-Sensor Configuration
+
+The firmware also supports a three-sensor configuration for measuring intermediate points:
+
+```cpp
+#define PIN_INICIO      2   // INT0
+#define PIN_INTERMEDIO  3   // INT1  
+#define PIN_FINAL       4   // PCINT20 (PORTD)
+
+enum Estado {
+  ESPERANDO_INICIO,
+  ESPERANDO_INTERMEDIO,
+  ESPERANDO_FINAL
+};
+
+volatile Estado estado = ESPERANDO_INICIO;
+volatile unsigned long tInicio = 0;
+volatile unsigned long tIntermedio = 0;
+volatile unsigned long tFinal = 0;
+```
+
+### State Transitions
+
+```cpp
+void isrInicio() {
+  if (estado == ESPERANDO_INICIO) {
+    noInterrupts();
+    contadorMs = 0;
+    tInicio = 0;
+    estado = ESPERANDO_INTERMEDIO;
+    interrupts();
+  }
+}
+
+void isrIntermedio() {
+  if (estado == ESPERANDO_INTERMEDIO) {
+    noInterrupts();
+    tIntermedio = contadorMs;
+    estado = ESPERANDO_FINAL;
+    interrupts();
+  }
+}
+```
+
+### Gravity Calculation
+
+The three-sensor version calculates gravitational acceleration:
+
+```cpp
+float S1 = 0.68;  // Distance to intermediate sensor (meters)
+float S2 = 1.75;  // Distance to final sensor (meters)
+
+// Calculate gravity using: g = 2*distance / time²
+double g1 = (2*S1)/(tm*tm*0.000001);
+double g2 = (2*S2)/(tf*tf*0.000001);
+```
+
+## Key Features
+
+- **Hardware interrupts** for precise edge detection
+- **Timer-based counting** for accurate millisecond timing
+- **State machine** prevents spurious triggers
+- **Critical sections** ensure thread-safe access to shared variables
+- **Support for multiple sensors** for intermediate measurements
+- **Gravity calculation** in three-sensor configuration
+
+## Platform Support
+
+- **Arduino (ATmega328)**: Uses Timer1 with 1ms resolution
+- **ESP32**: Uses FreeRTOS primitives and `millis()` for timing
+
+## Timing Resolution
+
+- **Arduino**: 1 millisecond (using Timer1)
+- **ESP32**: 1 millisecond (using `millis()`)
+- **Alternative ESP32**: Microsecond resolution available with `micros()`

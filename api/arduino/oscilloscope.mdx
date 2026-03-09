@@ -1,0 +1,250 @@
+---
+title: Oscilloscope/ADC Firmware
+description: ESP32 firmware for real-time ADC streaming and data acquisition
+---
+
+## Overview
+
+The oscilloscope firmware provides real-time analog-to-digital conversion (ADC) streaming from two input channels. It runs on ESP32 and can stream ADC data over serial at configurable sample rates.
+
+## Pin Configuration
+
+```cpp
+#define ADC1_PIN 34  // ADC Channel 1 (GPIO 34)
+#define ADC2_PIN 35  // ADC Channel 2 (GPIO 35)
+```
+
+<Note>
+GPIO 34 and 35 are ADC1 channels on ESP32 and are input-only pins, making them ideal for analog measurements.
+</Note>
+
+## Sampling Configuration
+
+```cpp
+#define ADC_READ_INTERVAL_US (1000000 / 200)  // 200 samples per second
+
+volatile bool adcStreaming = false;   // Streaming flag
+unsigned long lastAdcMicros = 0;      // Last sample timestamp
+```
+
+### Sample Rate Calculation
+
+The sample interval is calculated as:
+
+```cpp
+Interval (μs) = 1,000,000 / Sample Rate (Hz)
+```
+
+For 200 Hz: `1,000,000 / 200 = 5,000 μs` (5 ms between samples)
+
+## Command Protocol
+
+### Starting ADC Streaming
+
+Send the following command over serial:
+
+```
+ADC START
+```
+
+Response:
+```
+ADC STREAMING STARTED
+```
+
+### Stopping ADC Streaming
+
+```
+ADC STOP
+```
+
+Response:
+```
+ADC STREAMING STOPPED
+```
+
+## Serial Data Format
+
+When streaming is active, data is sent in CSV format:
+
+```
+S,<adc1_value>,<adc2_value>
+```
+
+### Example Output
+
+```
+S,2048,1856
+S,2050,1860
+S,2045,1855
+S,2052,1862
+```
+
+- **Prefix**: `S,` indicates a sample line
+- **ADC1**: First value (0-4095)
+- **ADC2**: Second value (0-4095)
+
+<Note>
+ESP32 ADC has 12-bit resolution, providing values from 0 to 4095 (0V to 3.3V).
+</Note>
+
+## Setup Function
+
+```cpp
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  
+  // ADC pins are input-only by default
+  // No pinMode() configuration needed for GPIO 34, 35
+  
+  Serial.println("Generador listo - CH1 y CH2 totalmente independientes");
+}
+```
+
+## Main Loop - ADC Streaming
+
+```cpp
+void loop() {
+  // Process serial commands
+  if (Serial.available()) {
+    String cmd = Serial.readStringUntil('\n');
+    cmd.trim();
+    
+    if (cmd.length() == 0) return;
+    
+    if (cmd == "ADC START") {
+      adcStreaming = true;
+      Serial.println("ADC STREAMING STARTED");
+    } 
+    else if (cmd == "ADC STOP") {
+      adcStreaming = false;
+      Serial.println("ADC STREAMING STOPPED");
+    }
+  }
+  
+  // Stream ADC data at specified interval
+  if (adcStreaming) {
+    unsigned long now = micros();
+    if (now - lastAdcMicros >= ADC_READ_INTERVAL_US) {
+      lastAdcMicros = now;
+      
+      int adc1 = analogRead(ADC1_PIN);
+      int adc2 = analogRead(ADC2_PIN);
+      
+      Serial.print("S,");
+      Serial.print(adc1);
+      Serial.print(",");
+      Serial.println(adc2);
+    }
+  }
+}
+```
+
+## ADC Reading Function
+
+The ESP32 `analogRead()` function:
+
+```cpp
+int adc1 = analogRead(ADC1_PIN);  // Returns 0-4095
+int adc2 = analogRead(ADC2_PIN);  // Returns 0-4095
+```
+
+### Voltage Conversion
+
+To convert ADC values to voltage:
+
+```cpp
+float voltage1 = (adc1 / 4095.0) * 3.3;  // 0V to 3.3V
+float voltage2 = (adc2 / 4095.0) * 3.3;  // 0V to 3.3V
+```
+
+## Timing Precision
+
+The firmware uses `micros()` for microsecond-level timing:
+
+```cpp
+unsigned long now = micros();
+if (now - lastAdcMicros >= ADC_READ_INTERVAL_US) {
+  lastAdcMicros = now;
+  // Perform ADC reading
+}
+```
+
+This ensures consistent sample intervals even with serial communication overhead.
+
+## Sample Rate Configuration
+
+To modify the sample rate, change the definition:
+
+```cpp
+// 100 Hz (10ms interval)
+#define ADC_READ_INTERVAL_US (1000000 / 100)
+
+// 500 Hz (2ms interval)
+#define ADC_READ_INTERVAL_US (1000000 / 500)
+
+// 1000 Hz (1ms interval)
+#define ADC_READ_INTERVAL_US (1000000 / 1000)
+```
+
+<Warning>
+Higher sample rates require faster serial baud rates. At 115200 baud, effective maximum sample rate is approximately 1000 Hz for two channels.
+</Warning>
+
+## Integration with Signal Generator
+
+The oscilloscope firmware is integrated with the signal generator in the same sketch:
+
+```cpp
+// Combined firmware supports:
+// - ADC streaming (oscilloscope)
+// - DAC output (signal generator)
+// Both functions operate independently
+```
+
+See [Signal Generator](/api/arduino/signal-generator) for DAC functionality.
+
+## Command Processing Flow
+
+```cpp
+if (Serial.available()) {
+  String cmd = Serial.readStringUntil('\n');
+  cmd.trim();
+  
+  if (cmd == "ADC START") {
+    adcStreaming = true;
+  } 
+  else if (cmd == "ADC STOP") {
+    adcStreaming = false;
+  } 
+  else {
+    // Process signal generator commands
+    processCommand(cmd);
+  }
+}
+```
+
+## Key Features
+
+- **Dual-channel ADC** with simultaneous sampling
+- **Configurable sample rate** via `ADC_READ_INTERVAL_US`
+- **CSV data format** for easy parsing
+- **Microsecond timing** for precise intervals
+- **Serial command control** for start/stop
+- **12-bit resolution** (0-4095 range)
+- **Non-blocking operation** in main loop
+
+## ESP32 ADC Specifications
+
+| Parameter | Value |
+|-----------|-------|
+| Resolution | 12-bit (0-4095) |
+| Input Range | 0V to 3.3V |
+| ADC Channels | ADC1: GPIO 32-39<br/>ADC2: GPIO 0, 2, 4, 12-15, 25-27 |
+| Recommended Pins | GPIO 34, 35 (input-only, no pull-up/down) |
+| Max Sample Rate | ~40 kHz (hardware limit) |
+
+<Note>
+ADC2 is used by WiFi. For reliable ADC readings, use ADC1 channels (GPIO 32-39) when WiFi is active.
+</Note>
