@@ -1,0 +1,115 @@
+{
+  "projectType": "general",
+  "projectName": "PhysisLab",
+  "projectDescription": "Collection of low-cost physics laboratory experiments using computer vision, microcontrollers, and signal processing",
+  "theme": "palm",
+  "primaryColor": "#2E86C1",
+  "lightColor": "#5DADE2",
+  "darkColor": "#1B4F72",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Getting Started",
+            "pages": [
+              "introduction",
+              "requirements",
+              "installation"
+            ]
+          },
+          {
+            "group": "Experiments",
+            "pages": [
+              "experiments/overview",
+              "experiments/freefall",
+              "experiments/pendulum",
+              "experiments/spring-mass",
+              "experiments/projectile-motion",
+              "experiments/kinematics"
+            ]
+          },
+          {
+            "group": "Instruments",
+            "pages": [
+              "instruments/overview",
+              "instruments/oscilloscope",
+              "instruments/signal-generator"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/camera-tracking",
+              "guides/color-detection",
+              "guides/microcontroller-setup",
+              "guides/data-analysis"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Hardware",
+        "groups": [
+          {
+            "group": "Components",
+            "pages": [
+              "hardware/esp32",
+              "hardware/sensors",
+              "hardware/cameras"
+            ]
+          },
+          {
+            "group": "Circuits",
+            "pages": [
+              "hardware/circuits/freefall-detector",
+              "hardware/circuits/oscilloscope",
+              "hardware/circuits/signal-generator"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Python Scripts",
+            "pages": [
+              "api/tracking-functions",
+              "api/analysis-functions",
+              "api/gui-components"
+            ]
+          },
+          {
+            "group": "Arduino Firmware",
+            "pages": [
+              "api/arduino/freefall",
+              "api/arduino/oscilloscope",
+              "api/arduino/signal-generator"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Computer vision-based motion tracking with OpenCV",
+    "Real-time data acquisition with ESP32 microcontrollers",
+    "PyQt5 oscilloscope and signal generator interfaces",
+    "Automated physics experiment analysis with NumPy and SciPy",
+    "Multiple measurement methods: camera, audio, sensors",
+    "Low-cost experimental setups for education"
+  ],
+  "publicApiSurface": [
+    "FreeFallCam.py - Camera-based free fall timing",
+    "deteccion_por_sonido.py - Audio-based time measurement",
+    "analisis.py - Pendulum motion analysis",
+    "analisis.py - Kinematic motion tracking",
+    "GUIOSCI.py - Oscilloscope GUI interface",
+    "FreeFallEpsfreeRTOSFunciona.ino - ESP32 free fall timer",
+    "GENERADOR_OSCILOSCOPIO.ino - ESP32 signal generator",
+    "VL53_filtros.ino - Distance sensor with filtering",
+    "procesar.py - Data processing utilities"
+  ]
+}
